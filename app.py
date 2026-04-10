@@ -8,11 +8,12 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 # ──────────────────────────────────────────────
-#  Configuration des colonnes
+#  Configuration des colonnes (Mise à jour : MOMO)
 # ──────────────────────────────────────────────
 COLUMNS_BY_TYPE = {
     "Facturation Achat": {
         "extract_only": False,
+        "description": "📦 **Extraction + Déduplication** : Garde uniquement les lignes uniques pour vos achats.",
         "columns": ["Date", "Products", "Quantity ordered", "Price", "Order number"],
         "rename": {
             "Price":        "Prix Achat HT",
@@ -21,6 +22,7 @@ COLUMNS_BY_TYPE = {
     },
     "Facturation Client": {
         "extract_only": True,
+        "description": "👥 **Extraction seule** : Prépare vos données clients sans supprimer de lignes.",
         "columns": [
             "Submit date", "Object code", "Object fullname", "Document number",
             "Delivery date", "Transport fees", "Product code", "Product",
@@ -45,6 +47,17 @@ COLUMNS_BY_TYPE = {
         },
         "extra_columns": ["N° Camion", "Chauffeur", "Vendeur", "Tournée"],
     },
+    "Momo": {
+        "extract_only": True,
+        "description": "📱 **Traitement Momo (CSV/Excel)** : Extraction et renommage spécifique des flux mobiles.",
+        "columns": ["Id", "Date", "Status", "Type", "From", "To name", "Amount", "Balance"],
+        "rename": {
+            "Id":      "N° Identification",
+            "From":    "Provenance",
+            "To name": "To handler name",
+        },
+        "extra_columns": ["Vendeur", "Compte", "Tournée"],
+    }
 }
 
 INDEX_SHEET_NAME = "Données"
@@ -189,6 +202,20 @@ def filter_columns(df, sheet_name, file_type):
         df_out[extra_col] = ""
     return df_out, missing, list(df_out.columns)
 
+def load_data(uploaded_file):
+    """Charge un fichier CSV ou Excel en dictionnaire de DataFrames."""
+    filename = uploaded_file.name
+    if filename.endswith('.csv'):
+        # Tenter plusieurs séparateurs courants pour le CSV
+        try:
+            df = pd.read_csv(uploaded_file, sep=None, engine='python')
+        except:
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, sep=',')
+        return {"Données_CSV": df}
+    else:
+        return pd.read_excel(uploaded_file, sheet_name=None)
+
 def process_multiple_files(uploaded_files, file_type, index_file=None):
     all_results = []
     output = io.BytesIO()
@@ -196,7 +223,7 @@ def process_multiple_files(uploaded_files, file_type, index_file=None):
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         for uploaded_file in uploaded_files:
             uploaded_file.seek(0)
-            excel_data = pd.read_excel(uploaded_file, sheet_name=None)
+            excel_data = load_data(uploaded_file)
             file_sheets_res = []
             for sheet_name, df in excel_data.items():
                 df_filtered, missing_cols, exported_cols = filter_columns(df, sheet_name, file_type)
@@ -210,7 +237,7 @@ def process_multiple_files(uploaded_files, file_type, index_file=None):
                     unique_rows = len(df_result)
                     duplicate_rows = len(df) - unique_rows
                 
-                sheet_export_name = f"{uploaded_file.name[:15]}_{sheet_name[:10]}"
+                sheet_export_name = f"{uploaded_file.name[:15]}_{sheet_name[:10]}".replace('.', '_')
                 df_result.to_excel(writer, sheet_name=sheet_export_name, index=False)
                 
                 file_sheets_res.append({
@@ -233,95 +260,106 @@ def process_multiple_files(uploaded_files, file_type, index_file=None):
 
     final_output = io.BytesIO()
     wb.save(final_output)
-    
-    # Générer l'index
     index_data = update_index_streamlit(all_results, file_type, index_file)
-    
     return final_output.getvalue(), index_data, all_results
 
 # ──────────────────────────────────────────────
-#  Interface Streamlit avec Session State
+#  Interface Streamlit (UX Optimisée)
 # ──────────────────────────────────────────────
-st.set_page_config(page_title="Excel Batch Processor Pro", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Excel & CSV Processor Pro", page_icon="📈", layout="wide")
 
-if 'results' not in st.session_state:
-    st.session_state.results = None
-if 'processed_data' not in st.session_state:
-    st.session_state.processed_data = None
-if 'index_data' not in st.session_state:
-    st.session_state.index_data = None
-if 'current_file_type' not in st.session_state:
-    st.session_state.current_file_type = None
+st.markdown("""
+    <style>
+    .main { background-color: #f8f9fa; }
+    .stButton>button { border-radius: 8px; height: 3em; font-weight: bold; }
+    .step-box { background-color: #ffffff; padding: 20px; border-radius: 10px; border-left: 5px solid #2E4057; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .step-title { color: #2E4057; font-size: 1.2em; font-weight: bold; margin-bottom: 10px; }
+    </style>
+    """, unsafe_allow_html=True)
 
-st.title("📊 Excel Batch Processor & Extractor")
-st.markdown("Solution professionnelle pour le traitement par lots avec **mémorisation des résultats**.")
+if 'results' not in st.session_state: st.session_state.results = None
+if 'processed_data' not in st.session_state: st.session_state.processed_data = None
+if 'index_data' not in st.session_state: st.session_state.index_data = None
+if 'current_file_type' not in st.session_state: st.session_state.current_file_type = None
+
+st.title("📈 Excel & CSV Processor Pro")
+st.markdown("Solution professionnelle pour le traitement par lots : **Achat, Client et Momo**.")
 
 with st.sidebar:
-    st.header("1. Configuration")
-    file_type = st.selectbox("Type de traitement", options=[None] + list(COLUMNS_BY_TYPE.keys()), format_func=lambda x: "Standard" if x is None else x)
-    
-    st.header("2. Index Cumulatif")
-    index_file = st.file_uploader("Charger l'index actuel (.xlsx)", type=["xlsx"])
-    
-    if st.button("🔄 Réinitialiser l'application"):
+    st.image("https://img.icons8.com/fluency/96/microsoft-excel-2019.png", width=80)
+    st.header("🛠️ Options")
+    if st.button("🔄 Réinitialiser l'outil", use_container_width=True):
         st.session_state.results = None
         st.session_state.processed_data = None
         st.session_state.index_data = None
         st.session_state.current_file_type = None
         st.rerun()
 
-st.subheader("📁 Charger vos fichiers Excel")
-uploaded_files = st.file_uploader("Sélectionnez un ou plusieurs fichiers Excel", type=["xlsx"], accept_multiple_files=True)
+st.markdown('<div class="step-box"><div class="step-title">1️⃣ Configuration du Traitement</div>', unsafe_allow_html=True)
+col_cfg1, col_cfg2 = st.columns(2)
+with col_cfg1:
+    file_type = st.selectbox(
+        "Type de données à traiter", 
+        options=[None] + list(COLUMNS_BY_TYPE.keys()), 
+        format_func=lambda x: "✨ Traitement Standard" if x is None else x
+    )
+    if file_type:
+        st.info(COLUMNS_BY_TYPE[file_type]["description"])
 
-if uploaded_files and st.button("🚀 Lancer le traitement groupé", use_container_width=True):
-    with st.spinner(f"Traitement de {len(uploaded_files)} fichiers en cours..."):
-        try:
-            processed_data, index_data, all_results = process_multiple_files(uploaded_files, file_type, index_file)
-            
-            st.session_state.processed_data = processed_data
-            st.session_state.index_data = index_data
-            st.session_state.results = all_results
-            st.session_state.current_file_type = file_type
-            st.success("✅ Traitement terminé !")
-        except Exception as e:
-            st.error(f"Erreur : {e}")
+with col_cfg2:
+    index_file = st.file_uploader("📂 Index existant (Optionnel)", type=["xlsx"])
+st.markdown('</div>', unsafe_allow_html=True)
+
+st.markdown('<div class="step-box"><div class="step-title">2️⃣ Chargement des Fichiers (Excel ou CSV)</div>', unsafe_allow_html=True)
+uploaded_files = st.file_uploader(
+    "Glissez vos fichiers ici (.xlsx, .csv)", 
+    type=["xlsx", "csv"], 
+    accept_multiple_files=True
+)
+st.markdown('</div>', unsafe_allow_html=True)
+
+if uploaded_files:
+    if st.button("🚀 Lancer le Traitement Groupé", use_container_width=True, type="primary"):
+        with st.spinner("Analyse en cours..."):
+            try:
+                processed_data, index_data, all_results = process_multiple_files(uploaded_files, file_type, index_file)
+                st.session_state.processed_data = processed_data
+                st.session_state.index_data = index_data
+                st.session_state.results = all_results
+                st.session_state.current_file_type = file_type
+                st.balloons()
+            except Exception as e:
+                st.error(f"⚠️ Erreur : {e}")
 
 if st.session_state.results:
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.markdown("### 📋 Résumé Global")
+    st.markdown('<div class="step-box"><div class="step-title">3️⃣ Résultats & Téléchargements</div>', unsafe_allow_html=True)
+    res_col1, res_col2 = st.columns([2, 1])
+    with res_col1:
+        st.markdown("### 📋 Rapport d'analyse")
         report_data = []
         for f_res in st.session_state.results:
             for s_res in f_res["sheets"]:
                 report_data.append({
-                    "Fichier": f_res["filename"], 
-                    "Feuille": s_res["sheet_name"],
-                    "Lignes": s_res["total_rows"], 
-                    "Doublons": s_res["duplicate_rows"]
+                    "Fichier Source": f_res["filename"], "Feuille": s_res["sheet_name"],
+                    "Lignes": s_res["total_rows"], "Doublons": f"❌ {s_res['duplicate_rows']}" if s_res['duplicate_rows'] > 0 else "✅ 0"
                 })
-        st.table(pd.DataFrame(report_data))
-    
-    with col2:
+        st.dataframe(pd.DataFrame(report_data), use_container_width=True, hide_index=True)
+    with res_col2:
         st.markdown("### 📥 Téléchargements")
-        # Nom de fichier dynamique pour le fichier consolidé
         type_suffix = "Standard" if st.session_state.current_file_type is None else st.session_state.current_file_type.replace(" ", "_")
-        
         st.download_button(
             label="💾 Télécharger le fichier consolidé",
             data=st.session_state.processed_data,
-            file_name=f"traitement_{type_suffix}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            file_name=f"traitement_{type_suffix}_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-        
         if st.session_state.index_data:
-            # Nom de fichier dynamique pour l'index
-            index_filename = f"index_{type_suffix}.xlsx"
             st.download_button(
                 label=f"📂 Télécharger l'index {st.session_state.current_file_type if st.session_state.current_file_type else 'Standard'}", 
                 data=st.session_state.index_data, 
-                file_name=index_filename, 
+                file_name=f"index_{type_suffix}.xlsx", 
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
                 use_container_width=True
             )
-        st.info("💡 Vos résultats sont mémorisés. Vous pouvez cliquer sur les boutons de téléchargement sans perdre l'affichage.")
+    st.markdown('</div>', unsafe_allow_html=True)
