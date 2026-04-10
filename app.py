@@ -2,13 +2,14 @@ import streamlit as st
 import pandas as pd
 import io
 import os
+import re
 from datetime import datetime
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 # ──────────────────────────────────────────────
-#  Configuration des colonnes (Mise à jour : MOMO)
+#  Configuration des colonnes (Mise à jour : BASE MAGASIN)
 # ──────────────────────────────────────────────
 COLUMNS_BY_TYPE = {
     "Facturation Achat": {
@@ -57,7 +58,52 @@ COLUMNS_BY_TYPE = {
             "To name": "To handler name",
         },
         "extra_columns": ["Vendeur", "Compte", "Tournée"],
+    },
+    "FICHIER DES RISTOURNES": {
+        "extract_only": True,
+        "description": "💰 **Fichier des Ristournes** : Extraction et organisation des données de ristournes quotidiennes.",
+        "columns": [
+            "Code", "Store name", "Start date", "Document number", 
+            "Product code", "Product name", "Family", "CODE RABATES", "RISTOURNE"
+        ],
+        "rename": {},
+        "extra_columns": [],
+    },
+    "BASE MAGASIN": {
+        "extract_only": True,
+        "description": "🏪 **Base Magasin** : Gestion des mouvements de stock avec découpage de l'opération et du compte.",
+        "columns": [
+            "Product", "Change date", "Prev. quantity", "Cur. quantity", 
+            "Position record date", "Change source", "Document"
+        ],
+        "rename": {
+            "Product":              "Product",
+            "Change date":          "Date Opération",
+            "Prev. quantity":       "Quantité Initiale",
+            "Cur. quantity":        "Quantité Résultante",
+            "Position record date": "Journée",
+            "Change source":        "Référence",
+            "Document":             "Opération"
+        },
+        "extra_columns": ["Compte", "Responsable", "Camion", "Chauffeur"],
     }
+}
+
+# Mapping spécifique pour BASE MAGASIN
+BASE_MAGASIN_OPS = {
+    "LR": "Chargement",
+    "UC": "Déchargement",
+    "DO": "Sorties directes de stock",
+    "DI": "Entrées Directes de stock",
+    "BO": "Achat ou Commande Appro",
+    "DE": "Retour Emballages SABC"
+}
+
+BASE_MAGASIN_COMPTES = {
+    "S02004": "R1",
+    "S02003": "R2",
+    "S02005": "R3",
+    "S02006": "R4"
 }
 
 INDEX_SHEET_NAME = "Données"
@@ -192,21 +238,58 @@ def update_index_streamlit(all_results, file_type, existing_index_file=None):
 def filter_columns(df, sheet_name, file_type):
     if file_type is None or file_type not in COLUMNS_BY_TYPE:
         return df, [], list(df.columns)
+    
     config = COLUMNS_BY_TYPE[file_type]
     expected = [c for c in config["columns"]]
     rename_map = config.get("rename", {})
+    
     available = [c for c in expected if c in df.columns]
     missing = [c for c in expected if c not in df.columns]
-    df_out = df[available].rename(columns=rename_map)
+    
+    df_out = df[available].copy()
+    
+    # Logique spécifique pour BASE MAGASIN
+    if file_type == "BASE MAGASIN":
+        # 1. Formatage de date pour "Journée"
+        if "Position record date" in df_out.columns:
+            df_out["Position record date"] = pd.to_datetime(df_out["Position record date"], errors='coerce').dt.strftime('%d/%m/%Y')
+        
+        # 2. Découpage de la colonne Document (Opération et Compte)
+        if "Document" in df_out.columns:
+            def extract_op_compte(doc_str):
+                doc_str = str(doc_str)
+                op_val = ""
+                compte_val = ""
+                # Extraire Opération
+                for code, label in BASE_MAGASIN_OPS.items():
+                    if code in doc_str:
+                        op_val = label
+                        break
+                # Extraire Compte
+                for code, label in BASE_MAGASIN_COMPTES.items():
+                    if code in doc_str:
+                        compte_val = label
+                        break
+                return pd.Series([op_val, compte_val])
+            
+            df_out[["Document", "Compte"]] = df_out["Document"].apply(extract_op_compte)
+        else:
+            df_out["Compte"] = ""
+
+    # Renommage
+    df_out = df_out.rename(columns=rename_map)
+    
+    # Ajout des colonnes extra
     for extra_col in config.get("extra_columns", []):
-        df_out[extra_col] = ""
+        if extra_col not in df_out.columns:
+            df_out[extra_col] = ""
+            
     return df_out, missing, list(df_out.columns)
 
 def load_data(uploaded_file):
     """Charge un fichier CSV ou Excel en dictionnaire de DataFrames."""
     filename = uploaded_file.name
     if filename.endswith('.csv'):
-        # Tenter plusieurs séparateurs courants pour le CSV
         try:
             df = pd.read_csv(uploaded_file, sep=None, engine='python')
         except:
@@ -237,7 +320,9 @@ def process_multiple_files(uploaded_files, file_type, index_file=None):
                     unique_rows = len(df_result)
                     duplicate_rows = len(df) - unique_rows
                 
-                sheet_export_name = f"{uploaded_file.name[:15]}_{sheet_name[:10]}".replace('.', '_')
+                # Nettoyage du nom de la feuille
+                safe_name = uploaded_file.name.split('.')[0][:15]
+                sheet_export_name = f"{safe_name}_{sheet_name[:10]}".replace(' ', '_').replace('.', '_')
                 df_result.to_excel(writer, sheet_name=sheet_export_name, index=False)
                 
                 file_sheets_res.append({
@@ -264,7 +349,7 @@ def process_multiple_files(uploaded_files, file_type, index_file=None):
     return final_output.getvalue(), index_data, all_results
 
 # ──────────────────────────────────────────────
-#  Interface Streamlit (UX Optimisée)
+#  Interface Streamlit (Version UX Optimisée)
 # ──────────────────────────────────────────────
 st.set_page_config(page_title="Excel & CSV Processor Pro", page_icon="📈", layout="wide")
 
@@ -283,7 +368,7 @@ if 'index_data' not in st.session_state: st.session_state.index_data = None
 if 'current_file_type' not in st.session_state: st.session_state.current_file_type = None
 
 st.title("📈 Excel & CSV Processor Pro")
-st.markdown("Solution professionnelle pour le traitement par lots : **Achat, Client et Momo**.")
+st.markdown("Solution professionnelle pour le traitement par lots : **Achat, Client, Momo, Ristournes et Magasin**.")
 
 with st.sidebar:
     st.image("https://img.icons8.com/fluency/96/microsoft-excel-2019.png", width=80)
@@ -310,7 +395,7 @@ with col_cfg2:
     index_file = st.file_uploader("📂 Index existant (Optionnel)", type=["xlsx"])
 st.markdown('</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="step-box"><div class="step-title">2️⃣ Chargement des Fichiers (Excel ou CSV)</div>', unsafe_allow_html=True)
+st.markdown('<div class="step-box"><div class="step-title">2️⃣ Chargement des Fichiers</div>', unsafe_allow_html=True)
 uploaded_files = st.file_uploader(
     "Glissez vos fichiers ici (.xlsx, .csv)", 
     type=["xlsx", "csv"], 
@@ -320,7 +405,7 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 if uploaded_files:
     if st.button("🚀 Lancer le Traitement Groupé", use_container_width=True, type="primary"):
-        with st.spinner("Analyse en cours..."):
+        with st.spinner("Analyse intelligente en cours..."):
             try:
                 processed_data, index_data, all_results = process_multiple_files(uploaded_files, file_type, index_file)
                 st.session_state.processed_data = processed_data
@@ -329,7 +414,7 @@ if uploaded_files:
                 st.session_state.current_file_type = file_type
                 st.balloons()
             except Exception as e:
-                st.error(f"⚠️ Erreur : {e}")
+                st.error(f"⚠️ Erreur lors du traitement : {e}")
 
 if st.session_state.results:
     st.markdown('<div class="step-box"><div class="step-title">3️⃣ Résultats & Téléchargements</div>', unsafe_allow_html=True)
