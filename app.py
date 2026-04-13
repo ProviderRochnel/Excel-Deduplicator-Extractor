@@ -9,30 +9,48 @@ from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-# ── Patch mega.py : corrige "Invalid RSA public exponent" ──────────────────
-import importlib, types, site, os as _os
-
+# ── Patch mega.py en mémoire : corrige "Invalid RSA public exponent" ───────
 def _patch_mega():
     try:
+        import binascii
         import mega.mega as _mm
-        import inspect, textwrap
-        src = inspect.getsource(_mm._login_process if hasattr(_mm, '_login_process') else _mm.Mega._login_process)
+        from Crypto.PublicKey import RSA
+        from mega.crypto import (base64_to_a32, decrypt_key, a32_to_str,
+                                  encrypt_key, str_to_a32, mpi_to_int,
+                                  base64_url_decode, base64_url_encode)
+
+        def _fixed_login_process(self, resp, password):
+            encrypted_master_key = base64_to_a32(resp['k'])
+            self.master_key = decrypt_key(encrypted_master_key, password)
+            if 'tsid' in resp:
+                tsid = base64_url_decode(resp['tsid'])
+                key_encrypted = a32_to_str(encrypt_key(str_to_a32(tsid[:16]), self.master_key))
+                if key_encrypted == tsid[-16:]:
+                    self.sid = resp['tsid']
+            elif 'csid' in resp:
+                encrypted_rsa_private_key = base64_to_a32(resp['privk'])
+                rsa_private_key = decrypt_key(encrypted_rsa_private_key, self.master_key)
+                private_key = a32_to_str(rsa_private_key)
+                self.rsa_private_key = [0, 0, 0, 0]
+                for i in range(4):
+                    l = int(((private_key[0]) * 256 + (private_key[1]) + 7) / 8) + 2
+                    self.rsa_private_key[i] = mpi_to_int(private_key[:l])
+                    private_key = private_key[l:]
+                encrypted_sid = mpi_to_int(base64_url_decode(resp['csid']))
+                rsa_decrypter = RSA.construct((
+                    self.rsa_private_key[0] * self.rsa_private_key[1],
+                    65537,  # exposant public valide (au lieu de 0)
+                    self.rsa_private_key[2],
+                    self.rsa_private_key[0],
+                    self.rsa_private_key[1]
+                ))
+                sid = '%x' % rsa_decrypter.key._decrypt(encrypted_sid)
+                sid = binascii.unhexlify('0' + sid if len(sid) % 2 else sid)
+                self.sid = base64_url_encode(sid[:43])
+
+        _mm.Mega._login_process = _fixed_login_process
     except Exception:
-        pass
-    # Patch direct du fichier source au premier démarrage
-    for sp in site.getsitepackages():
-        target = _os.path.join(sp, 'mega', 'mega.py')
-        if _os.path.exists(target):
-            with open(target, 'r') as f:
-                code = f.read()
-            if 'self.rsa_private_key[0] * self.rsa_private_key[1], 0,' in code:
-                patched = code.replace(
-                    'self.rsa_private_key[0] * self.rsa_private_key[1], 0,',
-                    'self.rsa_private_key[0] * self.rsa_private_key[1], 65537,'
-                )
-                with open(target, 'w') as f:
-                    f.write(patched)
-            break
+        pass  # Si mega n'est pas installé, on ignore silencieusement
 
 _patch_mega()
 # ───────────────────────────────────────────────────────────────────────────
