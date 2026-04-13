@@ -8,6 +8,34 @@ from datetime import datetime
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+# ── Patch mega.py : corrige "Invalid RSA public exponent" ──────────────────
+import importlib, types, site, os as _os
+
+def _patch_mega():
+    try:
+        import mega.mega as _mm
+        import inspect, textwrap
+        src = inspect.getsource(_mm._login_process if hasattr(_mm, '_login_process') else _mm.Mega._login_process)
+    except Exception:
+        pass
+    # Patch direct du fichier source au premier démarrage
+    for sp in site.getsitepackages():
+        target = _os.path.join(sp, 'mega', 'mega.py')
+        if _os.path.exists(target):
+            with open(target, 'r') as f:
+                code = f.read()
+            if 'self.rsa_private_key[0] * self.rsa_private_key[1], 0,' in code:
+                patched = code.replace(
+                    'self.rsa_private_key[0] * self.rsa_private_key[1], 0,',
+                    'self.rsa_private_key[0] * self.rsa_private_key[1], 65537,'
+                )
+                with open(target, 'w') as f:
+                    f.write(patched)
+            break
+
+_patch_mega()
+# ───────────────────────────────────────────────────────────────────────────
 try:
     from mega import Mega
 except ImportError:
