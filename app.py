@@ -324,7 +324,7 @@ class MegaManager:
         return st.session_state.mega_client
     
     @staticmethod
-    def upload_to_mega(file_content: bytes, filename: str, folder_name: str = "FICHIERS TRAITES") -> bool:
+    def upload_to_mega(file_content: bytes, filename: str, folder_name: str = "DataHub_Indexes") -> bool:
         """Upload un fichier vers Mega.nz en conservant le format correct"""
         m = MegaManager.get_mega_client()
         if not m:
@@ -516,6 +516,7 @@ class DataProcessor:
             for uploaded_file in uploaded_files:
                 file_results = {"filename": uploaded_file.name, "sheets": []}
                 try:
+                    uploaded_file.seek(0)
                     sheets_dict = DataProcessor.load_data(uploaded_file)
                     for sheet_name, df in sheets_dict.items():
                         total_rows = len(df)
@@ -895,7 +896,7 @@ class DataHubApp:
         with s1:
             st.markdown(f"""
             <div class="stat-card">
-                <div class="stat-val">{{total_in}}</div>
+                <div class="stat-val">{total_in}</div>
                 <div class="stat-label">Lignes Entrantes</div>
             </div>
             """, unsafe_allow_html=True)
@@ -903,7 +904,7 @@ class DataHubApp:
         with s2:
             st.markdown(f"""
             <div class="stat-card">
-                <div class="stat-val" style="color:{SUCCESS_COLOR};">{{total_out}}</div>
+                <div class="stat-val" style="color:{SUCCESS_COLOR};">{total_out}</div>
                 <div class="stat-label">Lignes Uniques</div>
             </div>
             """, unsafe_allow_html=True)
@@ -911,7 +912,7 @@ class DataHubApp:
         with s3:
             st.markdown(f"""
             <div class="stat-card">
-                <div class="stat-val" style="color:{DANGER_COLOR};">{{total_in - total_out}}</div>
+                <div class="stat-val" style="color:{DANGER_COLOR};">{total_in - total_out}</div>
                 <div class="stat-label">Doublons Éliminés</div>
             </div>
             """, unsafe_allow_html=True)
@@ -946,9 +947,8 @@ class DataHubApp:
                     )
                     if success:
                         st.success(f"Données fusionnées avec succès dans `{fname}`")
-                        if st.button("Voir la bibliothèque", use_container_width=True):
-                            st.session_state.page = "Index"
-                            st.rerun()
+                        st.session_state.page = "Index"
+                        st.rerun()
                     else:
                         st.error("Erreur lors de la fusion de l'index.")
         
@@ -1006,7 +1006,7 @@ class DataHubApp:
                 st.info(f"Il vous reste {total - completed} tâches pour clôturer la journée.")
         
         with col_info2:
-            if st.button("?? Aller au Traitement", use_container_width=True, type="primary"):
+            if st.button("🚀 Aller au Traitement", use_container_width=True, type="primary"):
                 st.session_state.page = "Traitement"
                 st.rerun()
 
