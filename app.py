@@ -14,7 +14,6 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 
-
 # ============================================================================
 # CONFIGURATION ET CONSTANTES
 # ============================================================================
@@ -304,7 +303,6 @@ class DailyTaskManager:
 
 
 
-
 class ExcelStyler:
     """Gestion des styles Excel"""
     
@@ -462,7 +460,18 @@ class DataProcessor:
                         df_proc[TRACE_COLS[0]] = uploaded_file.name
                         df_proc[TRACE_COLS[1]] = datetime.now().strftime("%d/%m/%Y %H:%M")
                         
-                        unique_rows = len(df_proc)
+                        # Calcul des doublons comme dans app.py
+                        if file_type in COLUMNS_CONFIG:
+                            extract_only = COLUMNS_CONFIG[file_type].get("extract_only", False)
+                        else:
+                            extract_only = False
+                        
+                        if extract_only:
+                            unique_rows, duplicate_rows = len(df_proc), 0
+                        else:
+                            df_temp = df_proc.drop_duplicates()
+                            unique_rows = len(df_temp)
+                            duplicate_rows = len(df_proc) - unique_rows
                         
                         # Écriture dans Excel
                         safe_sheet_name = re.sub(r'[\\/*?:\[\]]', '_', f"{uploaded_file.name[:20]}_{sheet_name[:10]}")
@@ -477,6 +486,7 @@ class DataProcessor:
                             "name": sheet_name,
                             "total_rows": total_rows,
                             "unique_rows": unique_rows,
+                            "duplicate_rows": duplicate_rows,
                             "missing_cols": missing
                         })
                 except Exception as e:
@@ -822,7 +832,7 @@ class DataHubApp:
         with s1:
             st.markdown(f"""
             <div class="stat-card">
-                <div class="stat-val">{{total_in}}</div>
+                <div class="stat-val">{total_in}</div>
                 <div class="stat-label">Lignes Entrantes</div>
             </div>
             """, unsafe_allow_html=True)
@@ -830,7 +840,7 @@ class DataHubApp:
         with s2:
             st.markdown(f"""
             <div class="stat-card">
-                <div class="stat-val" style="color:{SUCCESS_COLOR};">{{total_out}}</div>
+                <div class="stat-val" style="color:{SUCCESS_COLOR};">{total_out}</div>
                 <div class="stat-label">Lignes Uniques</div>
             </div>
             """, unsafe_allow_html=True)
@@ -838,7 +848,7 @@ class DataHubApp:
         with s3:
             st.markdown(f"""
             <div class="stat-card">
-                <div class="stat-val" style="color:{DANGER_COLOR};">{{total_in - total_out}}</div>
+                <div class="stat-val" style="color:{DANGER_COLOR};">{total_in - total_out}</div>
                 <div class="stat-label">Doublons Éliminés</div>
             </div>
             """, unsafe_allow_html=True)
@@ -849,10 +859,17 @@ class DataHubApp:
         
         with c_left:
             st.markdown("### Aperçu")
-            tab_data = [
-                {"Fichier": f["filename"], "Uniques": sum(s['unique_rows'] for s in f['sheets'])} 
-                for f in st.session_state.results
-            ]
+            # Calculer le total des doublons pour tous les fichiers
+            total_duplicates = sum(s.get('duplicate_rows', 0) for f in st.session_state.results for s in f['sheets'])
+            
+            tab_data = []
+            for f in st.session_state.results:
+                for s in f['sheets']:
+                    tab_data.append({
+                        "Fichier": f["filename"],
+                        "Feuille": s.get("name", s.get("sheet_name", "")),
+                        "Lignes unique": s['unique_rows'],
+                    })
             st.dataframe(pd.DataFrame(tab_data), use_container_width=True, hide_index=True)
         
         with c_right:
@@ -952,7 +969,7 @@ class DataHubApp:
         else:
             for idx_name in sorted(indexes):
                 with st.expander(f"📄 {idx_name}", expanded=False):
-                    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+                    c1, c2, c3 = st.columns([2, 1, 1])
                     with c1:
                         cat = idx_name.replace('index_', '').replace('.xlsx', '').replace('_', ' ')
                         st.markdown(f"**Catégorie** : {cat}")
@@ -963,18 +980,6 @@ class DataHubApp:
                             st.download_button("Télécharger", content, idx_name, key=f"dl_{idx_name}", use_container_width=True)
                     
                     with c3:
-                        content_dl = self.file_manager.get_local_index(idx_name)
-                        if content_dl:
-                            st.download_button(
-                                label="📥 Exporter",
-                                data=content_dl,
-                                file_name=idx_name,
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                key=f"exp_{idx_name}",
-                                use_container_width=True,
-                            )
-                    
-                    with c4:
                         if st.button("Supprimer", key=f"del_{idx_name}"):
                             if self.file_manager.delete_index(idx_name):
                                 st.rerun()
