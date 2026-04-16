@@ -3,5 +3,5 @@ pandas
 openpyxl
 numpy
 pycryptodome==3.9.6
-tenacity<6.0.0
+tenacity
 mega.py
