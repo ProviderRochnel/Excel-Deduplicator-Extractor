@@ -215,6 +215,20 @@ class FileManager:
         except Exception as e:
             st.error(f"Erreur lors de la liste des fichiers : {e}")
             return []
+    
+    @staticmethod
+    def delete_index(filename: str) -> bool:
+        """Supprime un index spécifique du dossier utilisateur"""
+        try:
+            index_folder = FileManager.get_index_folder()
+            file_path = index_folder / filename
+            if file_path.exists():
+                file_path.unlink()
+                return True
+            return False
+        except Exception as e:
+            st.error(f"Erreur lors de la suppression : {e}")
+            return False
 
 
 class DailyTaskManager:
@@ -1015,10 +1029,11 @@ class DataHubApp:
             
             for idx_name in sorted(indexes):
                 with st.expander(f"{idx_name}", expanded=False):
-                    col1, col2 = st.columns([3, 1])
+                    col1, col2, col3 = st.columns([2, 1, 1])
                     with col1:
                         st.markdown(f"**Nom du fichier** : `{idx_name}`")
                         st.markdown(f"**Catégorie** : {idx_name.replace('index_', '').replace('.xlsx', '').replace('_', ' ')}")
+                    
                     with col2:
                         content = self.file_manager.get_local_index(idx_name)
                         if content:
@@ -1026,9 +1041,34 @@ class DataHubApp:
                                 f"Télécharger", 
                                 data=content, 
                                 file_name=idx_name, 
-                                key=idx_name, 
+                                key=f"download_{idx_name}", 
                                 use_container_width=True
                             )
+                    
+                    with col3:
+                        # Afficher le dialogue de confirmation si nécessaire
+                        if st.session_state.get(f"confirm_delete_{idx_name}", False):
+                            st.error(f"⚠️ **Confirmer la suppression**")
+                            st.markdown(f"Voulez-vous vraiment supprimer l'index `{idx_name}` ?")
+                            col_confirm, col_cancel = st.columns([1, 1])
+                            
+                            with col_confirm:
+                                if st.button("✅ Oui, supprimer", key=f"confirm_yes_{idx_name}", type="primary"):
+                                    if self.file_manager.delete_index(idx_name):
+                                        st.success(f"Index '{idx_name}' supprimé avec succès !")
+                                        st.session_state[f"confirm_delete_{idx_name}"] = False
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Erreur lors de la suppression de '{idx_name}'")
+                            
+                            with col_cancel:
+                                if st.button("❌ Annuler", key=f"confirm_cancel_{idx_name}"):
+                                    st.session_state[f"confirm_delete_{idx_name}"] = False
+                                    st.rerun()
+                        else:
+                            if st.button(f"🗑️", key=f"delete_{idx_name}", help="Supprimer cet index"):
+                                st.session_state[f"confirm_delete_{idx_name}"] = True
+                                st.rerun()
     
     def run(self) -> None:
         """Point d'entrée principal de l'application"""
