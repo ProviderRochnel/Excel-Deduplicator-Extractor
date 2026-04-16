@@ -1,11 +1,3 @@
-"""
-DataHub Pro - Application de Traitement de Données Excel
-Version optimisée avec structure modulaire et maintenabilité
-"""
-
-# ============================================================================
-# IMPORTATIONS
-# ============================================================================
 import streamlit as st
 import pandas as pd
 import io
@@ -20,6 +12,7 @@ from typing import Dict, List, Tuple, Optional, Any
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from mega import Mega
 
 
 # ============================================================================
@@ -115,35 +108,35 @@ COLUMNS_CONFIG = {
     }
 }
 
-# Configuration des tâches quotidiennes
+# Configuration des tâches quotidiennes avec icônes améliorées
 DAILY_TASKS_CONFIG = {
     "Inventaire": {
         "category": "FICHIER DES INVENTAIRES",
-        "icon": "",
+        "icon": "📋",
         "description": "Clôture journalière des stocks",
         "priority": 1
     },
     "Données Magasin": {
         "category": "BASE MAGASIN", 
-        "icon": "",
+        "icon": "🏪",
         "description": "Mouvements de stock du jour",
         "priority": 2
     },
     "Ristourne": {
         "category": "FICHIER DES RISTOURNES",
-        "icon": "", 
+        "icon": "💰", 
         "description": "Calcul des ristournes quotidiennes",
         "priority": 3
     },
     "Vente": {
         "category": "Facturation Client",
-        "icon": "",
+        "icon": "🤝",
         "description": "Facturation clients du jour", 
         "priority": 4
     },
     "Achat": {
         "category": "Facturation Achat",
-        "icon": "",
+        "icon": "🛒",
         "description": "Facturation achats du jour",
         "priority": 5
     }
@@ -157,11 +150,11 @@ BASE_MAGASIN_COMPTES = {"S02004": "R1", "S02003": "R2", "S02005": "R3", "S02006"
 STOCKS_NATURES = {"BEER": "BIÈRES", "BG": "BOISSONS RAFRAICHISSANTE SANS ALCOOL", "AM": "ALCOOL MIX", "EAU": "EAUX MINERALES NATURELLES", "EMB": "PACKAGES"}
 
 # Styles et couleurs
-PRIMARY_COLOR = "2E4057"
-SUCCESS_COLOR = "28a745"
-WARNING_COLOR = "ffc107"
-DANGER_COLOR = "dc3545"
-LIGHT_COLOR = "f8f9fa"
+PRIMARY_COLOR = "#2E4057"
+SUCCESS_COLOR = "#28a745"
+WARNING_COLOR = "#ffc107"
+DANGER_COLOR = "#dc3545"
+LIGHT_COLOR = "#f8f9fa"
 
 
 # ============================================================================
@@ -176,7 +169,20 @@ class FileManager:
         """Crée et retourne le chemin du dossier DataHub_Index dans le dossier utilisateur"""
         user_folder = Path.home()
         index_folder = user_folder / "DataHub_Index"
-        index_folder.mkdir(exist_ok=True)
+        
+        # Vérifier si le dossier existe déjà
+        if index_folder.exists():
+            if index_folder.is_dir():
+                # Le dossier existe déjà, ne rien faire
+                pass
+            else:
+                # Un fichier existe avec ce nom, le supprimer
+                index_folder.unlink(missing_ok=True)
+                index_folder.mkdir(exist_ok=True)
+        else:
+            # Créer le dossier
+            index_folder.mkdir(exist_ok=True)
+        
         return index_folder
     
     @staticmethod
@@ -296,6 +302,72 @@ class DailyTaskManager:
         return completed, total
 
 
+class MegaManager:
+    """Gestion des opérations Mega.nz"""
+    
+    @staticmethod
+    def get_mega_client():
+        """Obtient le client Mega.nz connecté"""
+        if "mega_client" not in st.session_state:
+            email = st.secrets.get("MEGA_EMAIL") or st.sidebar.text_input("Email Mega", type="default")
+            password = st.secrets.get("MEGA_PASSWORD") or st.sidebar.text_input("Mot de passe Mega", type="password")
+            if email and password:
+                try:
+                    mega = Mega()
+                    st.session_state.mega_client = mega.login(email, password)
+                    return st.session_state.mega_client
+                except Exception as e:
+                    st.error(f"Erreur de connexion Mega : {e}")
+                    return None
+            else:
+                return None
+        return st.session_state.mega_client
+    
+    @staticmethod
+    def upload_to_mega(file_content: bytes, filename: str, folder_name: str = "FICHIERS TRAITES") -> bool:
+        """Upload un fichier vers Mega.nz en conservant le format correct"""
+        m = MegaManager.get_mega_client()
+        if not m:
+            return False
+        
+        try:
+            # Trouver ou créer le dossier
+            folder = m.find(folder_name)
+            if not folder:
+                folder = m.create_folder(folder_name)
+            
+            # Supprimer l'ancien fichier s'il existe
+            existing = m.find(filename)
+            if existing:
+                m.destroy(existing[0])
+            
+            # Créer un fichier temporaire avec la bonne extension
+            import tempfile
+            # Utiliser le suffixe du nom de fichier original pour garantir le format
+            suffix = Path(filename).suffix or ".xlsx"
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+                tmp_file.write(file_content)
+                tmp_path = tmp_file.name
+            
+            try:
+                # Upload vers Mega avec le nom de fichier original
+                # Copier le fichier temporaire vers le nom final avant upload
+                final_path = os.path.join(os.path.dirname(tmp_path), filename)
+                os.rename(tmp_path, final_path)
+                m.upload(final_path, folder[0])
+                os.remove(final_path)
+                return True
+            except Exception as e:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                st.error(f"Erreur upload Mega : {e}")
+                return False
+        except Exception as e:
+            st.error(f"Erreur lors de l'upload : {e}")
+            return False
+
+
 class ExcelStyler:
     """Gestion des styles Excel"""
     
@@ -305,7 +377,7 @@ class ExcelStyler:
         for col_idx in range(1, nb_cols + 1):
             cell = ws.cell(row=row, column=col_idx)
             cell.font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-            cell.fill = PatternFill("solid", start_color=PRIMARY_COLOR, end_color=PRIMARY_COLOR)
+            cell.fill = PatternFill("solid", start_color=PRIMARY_COLOR.replace("#", ""))
             cell.alignment = Alignment(horizontal="center", vertical="center")
     
     @staticmethod
@@ -442,233 +514,134 @@ class DataProcessor:
         
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             for uploaded_file in uploaded_files:
-                uploaded_file.seek(0)
-                excel_data = DataProcessor.load_data(uploaded_file)
-                file_sheets_res = []
+                file_results = {"filename": uploaded_file.name, "sheets": []}
+                try:
+                    sheets_dict = DataProcessor.load_data(uploaded_file)
+                    for sheet_name, df in sheets_dict.items():
+                        total_rows = len(df)
+                        df_proc, missing, final_cols = DataProcessor.filter_columns(df, sheet_name, file_type)
+                        
+                        # Ajout des colonnes de traçabilité
+                        df_proc[TRACE_COLS[0]] = uploaded_file.name
+                        df_proc[TRACE_COLS[1]] = datetime.now().strftime("%d/%m/%Y %H:%M")
+                        
+                        unique_rows = len(df_proc)
+                        
+                        # Écriture dans Excel
+                        safe_sheet_name = re.sub(r'[\\/*?:\[\]]', '_', f"{uploaded_file.name[:20]}_{sheet_name[:10]}")
+                        df_proc.to_excel(writer, sheet_name=safe_sheet_name, index=False)
+                        
+                        # Application des styles
+                        ws = writer.sheets[safe_sheet_name]
+                        ExcelStyler.apply_header_style(ws, len(df_proc.columns))
+                        ExcelStyler.apply_auto_width(ws)
+                        
+                        file_results["sheets"].append({
+                            "name": sheet_name,
+                            "total_rows": total_rows,
+                            "unique_rows": unique_rows,
+                            "missing_cols": missing
+                        })
+                except Exception as e:
+                    file_results["error"] = str(e)
                 
-                for sheet_name, df in excel_data.items():
-                    df_filtered, missing_cols, exported_cols = DataProcessor.filter_columns(df, sheet_name, file_type)
-                    
-                    if file_type in COLUMNS_CONFIG:
-                        extract_only = COLUMNS_CONFIG[file_type].get("extract_only", False)
-                    else:
-                        extract_only = False
-                    
-                    if extract_only:
-                        df_result = df_filtered.reset_index(drop=True)
-                        unique_rows, duplicate_rows = len(df_result), 0
-                    elif file_type == "BASE MAGASIN":
-                        # Le dédoublonnage est déjà effectué dans _process_base_magasin
-                        df_result = df_filtered.reset_index(drop=True)
-                        unique_rows = len(df_result)
-                        duplicate_rows = len(df) - unique_rows
-                    else:
-                        df_result = df_filtered.drop_duplicates()
-                        unique_rows = len(df_result)
-                        duplicate_rows = len(df) - unique_rows
-                    
-                    safe_name = uploaded_file.name.split('.')[0][:15]
-                    sheet_export_name = f"{safe_name}_{sheet_name[:10]}".replace(' ', '_').replace('.', '_')
-                    df_result.to_excel(writer, sheet_name=sheet_export_name, index=False)
-                    
-                    file_sheets_res.append({
-                        "sheet_name": sheet_name,
-                        "total_columns": len(df.columns),
-                        "total_rows": len(df),
-                        "unique_rows": unique_rows,
-                        "duplicate_rows": duplicate_rows,
-                        "extract_only": extract_only,
-                        "df_result": df_result
-                    })
-                
-                all_results.append({"filename": uploaded_file.name, "sheets": file_sheets_res})
+                all_results.append(file_results)
         
-        # Création du rapport global
-        output.seek(0)
-        wb = load_workbook(output)
-        ws_rep = wb.create_sheet("Rapport Global", 0)
-        
-        headers = ["Fichier", "Feuille", "Cols", "Lignes Tot.", "Uniques", "Doublons", "Mode"]
-        for i, h in enumerate(headers, 1):
-            cell = ws_rep.cell(row=1, column=i, value=h)
-            cell.fill = PatternFill("solid", start_color=PRIMARY_COLOR, end_color=PRIMARY_COLOR)
-            cell.font = Font(name="Arial", bold=True, color="FFFFFF")
-            cell.alignment = Alignment(horizontal="center")
-        
-        curr_row = 2
-        for file_res in all_results:
-            for r in file_res["sheets"]:
-                vals = [
-                    file_res["filename"], r["sheet_name"], r["total_columns"], 
-                    r["total_rows"], r["unique_rows"], r["duplicate_rows"], 
-                    "Extraction" if r["extract_only"] else "Dédoublonnage"
-                ]
-                for c, v in enumerate(vals, 1):
-                    cell = ws_rep.cell(row=curr_row, column=c, value=v)
-                    cell.border = ExcelStyler.get_border()
-                curr_row += 1
-        
-        ExcelStyler.apply_auto_width(ws_rep)
-        
-        # Appliquer les styles à toutes les feuilles
-        for sheet_name in wb.sheetnames:
-            if sheet_name != "Rapport Global":
-                ws = wb[sheet_name]
-                ExcelStyler.apply_header_style(ws, ws.max_column)
-                ExcelStyler.apply_auto_width(ws)
-        
-        final_output = io.BytesIO()
-        wb.save(final_output)
-        return final_output.getvalue(), all_results
+        return output.getvalue(), all_results
 
 
 class IndexManager:
-    """Gestion des index centralisés"""
+    """Gestion des index consolidés"""
     
     @staticmethod
-    def update_index_content(all_results: List[Dict], existing_index_content: Optional[bytes] = None) -> Tuple[Optional[bytes], int, int]:
-        """
-        Fusionne les nouveaux résultats dans l'index existant.
-        Règle : une ligne est ignorée si son contenu (hors colonnes de traçabilité)
-        existe déjà dans l'index.
-        """
-        now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        
-        # Lire l'index existant
-        df_existing = None
-        if existing_index_content:
-            try:
-                df_existing = pd.read_excel(
-                    io.BytesIO(existing_index_content),
-                    sheet_name=INDEX_SHEET_NAME,
-                    dtype=str
-                )
-            except Exception:
-                df_existing = None
-        
-        # Construire le DataFrame des nouvelles lignes
-        frames_new = []
-        for file_res in all_results:
-            for r in file_res["sheets"]:
-                df = r["df_result"].copy().astype(str)
-                df.insert(0, TRACE_COLS[0], file_res["filename"])
-                df.insert(1, TRACE_COLS[1], now_str)
-                frames_new.append(df)
-        
-        if not frames_new:
-            return None, 0, 0
-        
-        df_new = pd.concat(frames_new, ignore_index=True)
-        
-        # Déduplication par contenu (hors colonnes de traçabilité)
-        data_cols = [c for c in df_new.columns if c not in TRACE_COLS]
-        added_rows = 0
-        skipped_rows = 0
-        
-        if df_existing is not None and not df_existing.empty:
-            # Aligner les colonnes
-            all_cols = list(dict.fromkeys(list(df_existing.columns) + list(df_new.columns)))
-            df_existing = df_existing.reindex(columns=all_cols).astype(str)
-            df_new = df_new.reindex(columns=all_cols).astype(str)
+    def merge_to_index(processed_bytes: bytes, category: str) -> Tuple[bool, str]:
+        """Fusionne les nouvelles données avec l'index local existant"""
+        try:
+            filename = f"index_{category.replace(' ', '_')}.xlsx"
+            new_data_io = io.BytesIO(processed_bytes)
+            new_df_dict = pd.read_excel(new_data_io, sheet_name=None)
             
-            # Colonnes de comparaison
-            compare_cols = [c for c in data_cols if c in df_existing.columns]
+            # Combiner toutes les feuilles du nouveau traitement en un seul DF
+            new_df = pd.concat(new_df_dict.values(), ignore_index=True)
             
-            # Créer une clé de comparaison
-            existing_keys = set(
-                df_existing[compare_cols].fillna("").apply(
-                    lambda row: "||".join(row.values), axis=1
-                )
-            )
+            # Récupérer l'index existant
+            existing_content = FileManager.get_local_index(filename)
+            if existing_content:
+                existing_df = pd.read_excel(io.BytesIO(existing_content))
+                final_df = pd.concat([existing_df, new_df], ignore_index=True)
+            else:
+                final_df = new_df
             
-            def is_new_row(row):
-                key = "||".join(row[compare_cols].fillna("").values)
-                return key not in existing_keys
+            # Supprimer les doublons sur l'index global
+            # On garde la dernière occurrence pour mettre à jour les données si besoin
+            subset_cols = [c for c in final_df.columns if c not in TRACE_COLS]
+            final_df = final_df.drop_duplicates(subset=subset_cols, keep='last')
             
-            mask_new = df_new.apply(is_new_row, axis=1)
-            skipped_rows = (~mask_new).sum()
-            added_rows = mask_new.sum()
-            df_to_add = df_new[mask_new]
+            # Sauvegarder
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                final_df.to_excel(writer, index=False, sheet_name=INDEX_SHEET_NAME)
+                ws = writer.sheets[INDEX_SHEET_NAME]
+                ExcelStyler.apply_header_style(ws, len(final_df.columns))
+                ExcelStyler.apply_auto_width(ws)
             
-            df_final = pd.concat([df_existing, df_to_add], ignore_index=True)
-        else:
-            df_final = df_new
-            added_rows = len(df_new)
-        
-        if added_rows == 0:
-            return None, skipped_rows, added_rows
-        
-        # Écrire dans un classeur Excel formaté
-        wb_idx = Workbook()
-        ws_idx = wb_idx.active
-        ws_idx.title = INDEX_SHEET_NAME
-        
-        for c, col in enumerate(df_final.columns, 1):
-            ws_idx.cell(row=1, column=c, value=col)
-        ExcelStyler.apply_header_style(ws_idx, len(df_final.columns))
-        
-        for r_idx, row in enumerate(df_final.itertuples(index=False), start=2):
-            for c_idx, val in enumerate(row, 1):
-                cell_val = "" if (isinstance(val, float) and np.isnan(val)) else val
-                cell = ws_idx.cell(row=r_idx, column=c_idx, value=cell_val)
-                cell.border = ExcelStyler.get_border()
-                if c_idx <= 2:
-                    cell.font = Font(name="Arial", size=9, italic=True, color="555555")
-                    cell.fill = PatternFill("solid", start_color="E8F5E9", end_color="E8F5E9")
-        
-        ExcelStyler.apply_auto_width(ws_idx)
-        output = io.BytesIO()
-        wb_idx.save(output)
-        return output.getvalue(), skipped_rows, added_rows
+            if FileManager.save_index_locally(output.getvalue(), filename):
+                return True, filename
+            return False, ""
+        except Exception as e:
+            st.error(f"Erreur fusion index : {e}")
+            return False, ""
 
 
 # ============================================================================
-# INTERFACE UTILISATEUR
+# COMPOSANTS UI
 # ============================================================================
 
 class UIComponents:
-    """Composants UI réutilisables"""
+    """Gestion des composants d'interface Streamlit"""
     
     @staticmethod
     def setup_page_config() -> None:
-        """Configure la page Streamlit"""
+        """Configure les paramètres de la page"""
         st.set_page_config(
-            page_title="DataHub Pro | Traitement Local", 
-            layout="wide"
+            page_title="DataHub Pro | Excel Optimizer",
+            page_icon="📊",
+            layout="wide",
+            initial_sidebar_state="expanded"
         )
     
     @staticmethod
     def apply_custom_styles() -> None:
-        """Applique les styles CSS personnalisés"""
-        st.markdown("""
+        """Applique le CSS personnalisé"""
+        st.markdown(f"""
         <style>
-            .main { background-color: #f0f2f6; }
-            .stApp { background-color: #f0f2f6; }
-            .stButton>button { 
+            .main {{ background-color: #f0f2f6; }}
+            .stApp {{ background-color: #f0f2f6; }}
+            .stButton>button {{ 
                 border-radius: 12px; 
                 height: 3.5em; 
                 font-weight: 700; 
                 transition: all 0.3s; 
-            }
-            .stButton>button:hover { 
+            }}
+            .stButton>button:hover {{ 
                 transform: translateY(-2px); 
                 box-shadow: 0 4px 12px rgba(0,0,0,0.1); 
-            }
-            .step-card { 
+            }}
+            .step-card {{ 
                 background-color: #ffffff; 
                 padding: 25px; 
                 border-radius: 15px; 
                 margin-bottom: 25px; 
                 box-shadow: 0 4px 6px rgba(0,0,0,0.05); 
-                border-top: 5px solid #2E4057; 
-            }
-            .step-header { 
+                border-top: 5px solid {PRIMARY_COLOR}; 
+            }}
+            .step-header {{ 
                 display: flex; 
                 align-items: center; 
                 margin-bottom: 15px; 
-            }
-            .step-number { 
-                background-color: #2E4057; 
+            }}
+            .step-number {{ 
+                background-color: {PRIMARY_COLOR}; 
                 color: white; 
                 border-radius: 50%; 
                 width: 30px; 
@@ -678,34 +651,81 @@ class UIComponents:
                 justify-content: center; 
                 font-weight: bold; 
                 margin-right: 15px; 
-            }
-            .step-title { 
-                color: #2E4057; 
+            }}
+            .step-title {{ 
+                color: {PRIMARY_COLOR}; 
                 font-size: 1.3em; 
                 font-weight: bold; 
-            }
-            .stat-card { 
+            }}
+            .stat-card {{ 
                 background-color: #f8f9fa; 
                 padding: 15px; 
                 border-radius: 10px; 
                 text-align: center; 
                 border: 1px solid #e9ecef; 
-            }
-            .stat-val { 
+            }}
+            .stat-val {{ 
                 font-size: 1.8em; 
                 font-weight: bold; 
-                color: #2E4057; 
-            }
-            .stat-label { 
+                color: {PRIMARY_COLOR}; 
+            }}
+            .stat-label {{ 
                 font-size: 0.9em; 
                 color: #6c757d; 
-            }
-            .footer { 
+            }}
+            /* Styles améliorés pour les tâches quotidiennes */
+            .task-card {{
+                background-color: white;
+                border-radius: 12px;
+                padding: 20px;
+                margin-bottom: 15px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+                display: flex;
+                align-items: center;
+                border-left: 6px solid #e9ecef;
+                transition: all 0.2s;
+            }}
+            .task-card-completed {{
+                border-left-color: {SUCCESS_COLOR};
+                background-color: #f8fff9;
+            }}
+            .task-icon {{
+                font-size: 2em;
+                margin-right: 20px;
+                min-width: 50px;
+                text-align: center;
+            }}
+            .task-content {{
+                flex-grow: 1;
+            }}
+            .task-title {{
+                font-weight: bold;
+                font-size: 1.1em;
+                margin-bottom: 4px;
+                color: {PRIMARY_COLOR};
+            }}
+            .task-desc {{
+                color: #6c757d;
+                font-size: 0.9em;
+            }}
+            .task-badge {{
+                padding: 4px 10px;
+                border-radius: 20px;
+                font-size: 0.75em;
+                font-weight: bold;
+                text-transform: uppercase;
+                margin-top: 8px;
+                display: inline-block;
+            }}
+            .badge-todo {{ background-color: #ffeeba; color: #856404; }}
+            .badge-done {{ background-color: #d4edda; color: #155724; }}
+            
+            .footer {{ 
                 text-align: center; 
                 color: #adb5bd; 
                 padding: 40px 0; 
                 font-size: 0.85em; 
-            }
+            }}
         </style>
         """, unsafe_allow_html=True)
     
@@ -713,34 +733,44 @@ class UIComponents:
     def render_sidebar() -> None:
         """Affiche la barre latérale"""
         with st.sidebar:
-            st.markdown("### Centre de Contrôle")
+            st.markdown(f"<h2 style='color:{PRIMARY_COLOR};'>Centre de Contrôle</h2>", unsafe_allow_html=True)
             
             # Navigation
-            st.markdown("---")
-            if st.button("Traitement des fichiers", use_container_width=True):
+            # st.markdown("---")
+            if st.button("📊 Traitement des fichiers", use_container_width=True):
                 st.session_state.page = "Traitement"
                 st.rerun()
-            if st.button("Tâches Quotidiennes", use_container_width=True):
+            if st.button("📅 Tâches Quotidiennes", use_container_width=True):
                 st.session_state.page = "Taches"
                 st.rerun()
-            if st.button("Bibliothèque des Index", use_container_width=True):
+            if st.button("📚 Bibliothèque des Index", use_container_width=True):
                 st.session_state.page = "Index"
                 st.rerun()
             
-            # Information stockage
+            # # Information stockage
+            # st.markdown("---")
+            # st.markdown("### 💾 Stockage")
+            
+            # try:
+            #     index_folder = FileManager.get_index_folder()
+            #     st.success(f"Dossier prêt : `{index_folder.name}`")
+            # except Exception as e:
+            #     st.error(f"Erreur dossier : {e}")
+            
+            # st.info("Les index sont sauvegardés localement dans votre dossier utilisateur.")
+            
+            # Connexion Mega.nz
             st.markdown("---")
-            st.markdown("### Stockage Utilisateur")
+            st.markdown("### ☁️ Cloud Mega.nz")
+            mega_client = MegaManager.get_mega_client()
+            if mega_client:
+                st.success("Connecté à Mega.nz")
+            else:
+                st.warning("Non connecté")
+                st.caption("Configurez vos identifiants pour l'export cloud.")
             
-            try:
-                index_folder = FileManager.get_index_folder()
-                st.success(f"Dossier prêt : `{index_folder.name}`")
-                st.caption(f"Chemin complet : {index_folder}")
-            except Exception as e:
-                st.error(f"Erreur dossier : {e}")
-            
-            st.info("Les index sont sauvegardés dans le dossier **DataHub_Index** de votre répertoire utilisateur.")
-            
-            if st.button("Réinitialiser la session", use_container_width=True):
+            st.markdown("---")
+            if st.button("🔄 Réinitialiser la session", use_container_width=True):
                 for key in list(st.session_state.keys()):
                     del st.session_state[key]
                 st.rerun()
@@ -780,7 +810,7 @@ class DataHubApp:
         col_main1, col_main2 = st.columns([1, 1])
         
         with col_main1:
-            st.markdown("""
+            st.markdown(f"""
             <div class="step-card">
                 <div class="step-header">
                     <div class="step-number">1</div>
@@ -790,8 +820,9 @@ class DataHubApp:
             
             file_type = st.selectbox(
                 "Module métier", 
-                options=[None] + list(COLUMNS_CONFIG.keys()),
-                format_func=lambda x: "Traitement Standard" if x is None else x
+                options=list(COLUMNS_CONFIG.keys()),
+                index=None,
+                placeholder="Sélectionnez une catégorie..."
             )
             
             if file_type:
@@ -800,7 +831,7 @@ class DataHubApp:
             st.markdown('</div>', unsafe_allow_html=True)
         
         with col_main2:
-            st.markdown("""
+            st.markdown(f"""
             <div class="step-card">
                 <div class="step-header">
                     <div class="step-number">2</div>
@@ -815,7 +846,12 @@ class DataHubApp:
             )
             
             if uploaded_files:
-                if st.button("Lancer l'analyse", use_container_width=True, type="primary"):
+                # Validation : le traitement n'est possible que si une catégorie est sélectionnée
+                button_disabled = not file_type
+                if button_disabled:
+                    st.warning("Veuillez sélectionner une catégorie de traitement avant de lancer l'analyse.")
+                
+                if st.button("Lancer l'analyse", use_container_width=True, type="primary", disabled=button_disabled):
                     with st.spinner("Traitement en cours..."):
                         try:
                             p_data, results = self.processor.process_multiple_files(uploaded_files, file_type)
@@ -843,7 +879,7 @@ class DataHubApp:
     
     def _render_results_section(self) -> None:
         """Affiche la section des résultats"""
-        st.markdown("""
+        st.markdown(f"""
         <div class="step-card">
             <div class="step-header">
                 <div class="step-number">3</div>
@@ -859,7 +895,7 @@ class DataHubApp:
         with s1:
             st.markdown(f"""
             <div class="stat-card">
-                <div class="stat-val">{total_in}</div>
+                <div class="stat-val">{{total_in}}</div>
                 <div class="stat-label">Lignes Entrantes</div>
             </div>
             """, unsafe_allow_html=True)
@@ -867,7 +903,7 @@ class DataHubApp:
         with s2:
             st.markdown(f"""
             <div class="stat-card">
-                <div class="stat-val" style="color:{SUCCESS_COLOR};">{total_out}</div>
+                <div class="stat-val" style="color:{SUCCESS_COLOR};">{{total_out}}</div>
                 <div class="stat-label">Lignes Uniques</div>
             </div>
             """, unsafe_allow_html=True)
@@ -875,7 +911,7 @@ class DataHubApp:
         with s3:
             st.markdown(f"""
             <div class="stat-card">
-                <div class="stat-val" style="color:{DANGER_COLOR};">{total_in - total_out}</div>
+                <div class="stat-val" style="color:{DANGER_COLOR};">{{total_in - total_out}}</div>
                 <div class="stat-label">Doublons Éliminés</div>
             </div>
             """, unsafe_allow_html=True)
@@ -902,187 +938,125 @@ class DataHubApp:
                 use_container_width=True
             )
             
-            st.markdown("---")
-            st.markdown("#### Centralisation Locale")
-            if st.button("Fusionner avec l'Index Local", use_container_width=True, type="secondary"):
-                with st.spinner("Fusion de l'index local..."):
-                    idx_filename = f"index_{suffix}.xlsx"
-                    existing_content = self.file_manager.get_local_index(idx_filename)
-                    new_index_content, skipped, added = self.index_manager.update_index_content(
-                        st.session_state.results, existing_content
+            if st.session_state.current_file_type:
+                if st.button(f"Fusionner vers Index {st.session_state.current_file_type}", use_container_width=True, type="primary"):
+                    success, fname = self.index_manager.merge_to_index(
+                        st.session_state.processed_data, 
+                        st.session_state.current_file_type
                     )
-                    
-                    if new_index_content is None:
-                        st.warning(f"Aucune nouvelle ligne à ajouter - {skipped} ligne(s) déjà présentes.")
-                    elif self.file_manager.save_index_locally(new_index_content, idx_filename):
-                        st.success(f"Fusion réussie : **{added}** nouvelle(s) ligne(s) ajoutée(s), **{skipped}** doublon(s) ignoré(s).")
+                    if success:
+                        st.success(f"Données fusionnées avec succès dans `{fname}`")
+                        if st.button("Voir la bibliothèque", use_container_width=True):
+                            st.session_state.page = "Index"
+                            st.rerun()
                     else:
-                        st.error("Erreur lors de la sauvegarde locale.")
+                        st.error("Erreur lors de la fusion de l'index.")
         
         st.markdown('</div>', unsafe_allow_html=True)
-    
+
     def render_daily_tasks_page(self) -> None:
-        """Affiche la page des tâches quotidiennes"""
-        st.markdown("<h1>Tâches Quotidiennes Obligatoires</h1>", unsafe_allow_html=True)
+        """Affiche la page des tâches quotidiennes avec un design amélioré"""
+        st.markdown("<h1>Suivi des Tâches Quotidiennes</h1>", unsafe_allow_html=True)
         
-        # Afficher la date et le progrès
-        today_str = datetime.now().strftime("%d/%m/%Y")
         completed, total = self.task_manager.get_progress()
         progress_percent = (completed / total) * 100 if total > 0 else 0
+        today_str = datetime.now().strftime("%A %d %B %Y")
         
-        col1, col2, col3 = st.columns([2, 1, 1])
-        with col1:
-            st.markdown(f"### Date : {today_str}")
-        with col2:
-            st.markdown(f"### {completed}/{total}")
-        with col3:
-            st.markdown(f"### {progress_percent:.0f}%")
+        # En-tête de progression
+        col_head1, col_head2 = st.columns([2, 1])
+        with col_head1:
+            st.markdown(f"### {today_str}")
+            st.markdown(f"Complétion : **{completed} sur {total} tâches**")
+        with col_head2:
+            st.markdown(f"<h2 style='text-align:right; color:{SUCCESS_COLOR if completed==total else PRIMARY_COLOR};'>{progress_percent:.0f}%</h2>", unsafe_allow_html=True)
         
         st.progress(progress_percent / 100)
-        st.markdown("---")
+        st.markdown("<br>", unsafe_allow_html=True)
         
-        # Afficher les tâches
-        st.markdown("## Liste des Tâches")
-        
+        # Liste des tâches avec nouveau design
         for task_name, task_config in sorted(DAILY_TASKS_CONFIG.items(), key=lambda x: x[1]["priority"]):
             is_completed = self.task_manager.is_task_completed(task_name)
             
-            col_task, col_status = st.columns([4, 1])
+            status_class = "task-card-completed" if is_completed else ""
+            badge_class = "badge-done" if is_completed else "badge-todo"
+            badge_text = "Complété" if is_completed else "À faire"
             
-            with col_task:
-                if is_completed:
-                    st.markdown(f"""
-                    <div style="background-color: #d4edda; border-left: 4px solid {SUCCESS_COLOR}; padding: 15px; border-radius: 5px; margin: 10px 0;">
-                        <h4 style="margin: 0; color: #155724;">
-                            {task_config['icon']} <s>{task_name}</s>
-                        </h4>
-                        <p style="margin: 5px 0 0 0; color: #155724; font-size: 0.9em;">
-                            {task_config['description']} ? <strong>Catégorie: {task_config['category']}</strong>
-                        </p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.markdown(f"""
-                    <div style="background-color: {LIGHT_COLOR}; border-left: 4px solid #6c757d; padding: 15px; border-radius: 5px; margin: 10px 0;">
-                        <h4 style="margin: 0; color: #495057;">
-                            {task_config['icon']} {task_name}
-                        </h4>
-                        <p style="margin: 5px 0 0 0; color: #6c757d; font-size: 0.9em;">
-                            {task_config['description']} ? <strong>Catégorie: {task_config['category']}</strong>
-                        </p>
-                    </div>
-                    """, unsafe_allow_html=True)
-            
-            with col_status:
-                if is_completed:
-                    st.success("✅")
-                else:
-                    st.warning("⚠️")
+            st.markdown(f"""
+            <div class="task-card {status_class}">
+                <div class="task-icon">{task_config['icon']}</div>
+                <div class="task-content">
+                    <div class="task-title">{task_name}</div>
+                    <div class="task-desc">{task_config['description']}</div>
+                    <div class="task-badge {badge_class}">{badge_text}</div>
+                </div>
+                <div style="font-size: 1.5em;">
+                    {'✅' if is_completed else '⏳'}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
         
         st.markdown("---")
         
-        # Statistiques et instructions
-        col_info1, col_info2 = st.columns(2)
-        
+        # Section Info & Action
+        col_info1, col_info2 = st.columns([1, 1])
         with col_info1:
-            st.markdown("### Statistiques")
             if completed == total:
-                st.success("Toutes les tâches du jour sont complétées !")
+                st.success("Félicitations ! Toutes les tâches sont terminées.")
             else:
-                remaining = total - completed
-                st.info(f"Il reste {remaining} tâche(s) à compléter aujourd'hui.")
+                st.info(f"Il vous reste {total - completed} tâches pour clôturer la journée.")
         
         with col_info2:
-            st.markdown("### Instructions")
-            st.markdown("""
-            - Traitez les fichiers dans la section **Traitement**
-            - Sélectionnez la catégorie correspondante
-            - La tâche se coche automatiquement
-            - Le suivi est sauvegardé quotidiennement
-            """)
-        
-        # Bouton de navigation
-        if completed < total:
-            st.markdown("---")
-            if st.button("Aller au Traitement", use_container_width=True, type="primary"):
+            if st.button("?? Aller au Traitement", use_container_width=True, type="primary"):
                 st.session_state.page = "Traitement"
                 st.rerun()
-    
+
     def render_index_page(self) -> None:
         """Affiche la page de la bibliothèque d'index"""
-        st.markdown("<h1>Bibliothèque des Index (Utilisateur)</h1>", unsafe_allow_html=True)
+        st.markdown("<h1> Bibliothèque des Index</h1>", unsafe_allow_html=True)
         
         try:
-            index_folder = self.file_manager.get_index_folder()
-            st.success(f"Dossier de stockage prêt : `{index_folder}`")
-            st.caption(f"Chemin complet : {index_folder}")
-            
             indexes = self.file_manager.list_local_indexes()
         except Exception as e:
-            st.error(f"Impossible d'accéder au dossier de stockage : {e}")
+            st.error(f"Erreur d'accès : {e}")
             indexes = []
         
         if not indexes:
-            st.warning("Aucun index trouvé dans votre dossier utilisateur. Effectuez un traitement et fusionnez les données pour créer votre premier index.")
+            st.warning("Aucun index trouvé. Traitez des fichiers pour commencer à construire votre base de données.")
         else:
-            st.markdown("Retrouvez ici tous vos index sauvegardés dans votre dossier utilisateur. Vous pouvez les télécharger.")
-            
             for idx_name in sorted(indexes):
-                with st.expander(f"{idx_name}", expanded=False):
-                    col1, col2, col3 = st.columns([2, 1, 1])
-                    with col1:
-                        st.markdown(f"**Nom du fichier** : `{idx_name}`")
-                        st.markdown(f"**Catégorie** : {idx_name.replace('index_', '').replace('.xlsx', '').replace('_', ' ')}")
+                with st.expander(f"📄 {idx_name}", expanded=False):
+                    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+                    with c1:
+                        cat = idx_name.replace('index_', '').replace('.xlsx', '').replace('_', ' ')
+                        st.markdown(f"**Catégorie** : {cat}")
                     
-                    with col2:
+                    with c2:
                         content = self.file_manager.get_local_index(idx_name)
                         if content:
-                            st.download_button(
-                                f"Télécharger", 
-                                data=content, 
-                                file_name=idx_name, 
-                                key=f"download_{idx_name}", 
-                                use_container_width=True
-                            )
+                            st.download_button("Télécharger", content, idx_name, key=f"dl_{idx_name}", use_container_width=True)
                     
-                    with col3:
-                        # Afficher le dialogue de confirmation si nécessaire
-                        if st.session_state.get(f"confirm_delete_{idx_name}", False):
-                            st.error(f"⚠️ **Confirmer la suppression**")
-                            st.markdown(f"Voulez-vous vraiment supprimer l'index `{idx_name}` ?")
-                            col_confirm, col_cancel = st.columns([1, 1])
-                            
-                            with col_confirm:
-                                if st.button("✅ Oui, supprimer", key=f"confirm_yes_{idx_name}", type="primary"):
-                                    if self.file_manager.delete_index(idx_name):
-                                        st.success(f"Index '{idx_name}' supprimé avec succès !")
-                                        st.session_state[f"confirm_delete_{idx_name}"] = False
-                                        st.rerun()
+                    with c3:
+                        if st.button("☁️ Mega", key=f"mg_{idx_name}", help="Envoyer vers Mega.nz"):
+                            content = self.file_manager.get_local_index(idx_name)
+                            if content:
+                                with st.spinner("Upload..."):
+                                    if MegaManager.upload_to_mega(content, idx_name):
+                                        st.success("Upload réussi !")
                                     else:
-                                        st.error(f"Erreur lors de la suppression de '{idx_name}'")
-                            
-                            with col_cancel:
-                                if st.button("❌ Annuler", key=f"confirm_cancel_{idx_name}"):
-                                    st.session_state[f"confirm_delete_{idx_name}"] = False
-                                    st.rerun()
-                        else:
-                            if st.button(f"🗑️", key=f"delete_{idx_name}", help="Supprimer cet index"):
-                                st.session_state[f"confirm_delete_{idx_name}"] = True
+                                        st.error("Échec de l'upload.")
+                    
+                    with c4:
+                        if st.button("Supprimer", key=f"del_{idx_name}"):
+                            if self.file_manager.delete_index(idx_name):
                                 st.rerun()
-    
+
     def run(self) -> None:
         """Point d'entrée principal de l'application"""
-        # Configuration
         self.ui.setup_page_config()
         self.ui.apply_custom_styles()
-        
-        # Initialisation
         self.initialize_session()
-        
-        # Navigation
         self.ui.render_sidebar()
         
-        # Routage des pages
         if st.session_state.page == "Traitement":
             self.render_processing_page()
         elif st.session_state.page == "Taches":
@@ -1090,13 +1064,8 @@ class DataHubApp:
         elif st.session_state.page == "Index":
             self.render_index_page()
         
-        # Footer
-        st.markdown('<div class="footer">DataHub Pro v3.0 | Stockage Local | © 2024</div>', unsafe_allow_html=True)
+        st.markdown('<div class="footer">DataHub Pro v3.1 | Stockage Local | © 2024</div>', unsafe_allow_html=True)
 
-
-# ============================================================================
-# POINT D'ENTRÉE
-# ============================================================================
 
 if __name__ == "__main__":
     app = DataHubApp()
