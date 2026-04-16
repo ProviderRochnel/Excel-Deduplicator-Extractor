@@ -12,7 +12,7 @@ from typing import Dict, List, Tuple, Optional, Any
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from mega import Mega
+
 
 
 # ============================================================================
@@ -302,70 +302,7 @@ class DailyTaskManager:
         return completed, total
 
 
-class MegaManager:
-    """Gestion des opérations Mega.nz"""
-    
-    @staticmethod
-    def get_mega_client():
-        """Obtient le client Mega.nz connecté"""
-        if "mega_client" not in st.session_state:
-            email = st.secrets.get("MEGA_EMAIL") or st.sidebar.text_input("Email Mega", type="default")
-            password = st.secrets.get("MEGA_PASSWORD") or st.sidebar.text_input("Mot de passe Mega", type="password")
-            if email and password:
-                try:
-                    mega = Mega()
-                    st.session_state.mega_client = mega.login(email, password)
-                    return st.session_state.mega_client
-                except Exception as e:
-                    st.error(f"Erreur de connexion Mega : {e}")
-                    return None
-            else:
-                return None
-        return st.session_state.mega_client
-    
-    @staticmethod
-    def upload_to_mega(file_content: bytes, filename: str, folder_name: str = "DataHub_Indexes") -> bool:
-        """Upload un fichier vers Mega.nz en conservant le format correct"""
-        m = MegaManager.get_mega_client()
-        if not m:
-            return False
-        
-        try:
-            # Trouver ou créer le dossier
-            folder = m.find(folder_name)
-            if not folder:
-                folder = m.create_folder(folder_name)
-            
-            # Supprimer l'ancien fichier s'il existe
-            existing = m.find(filename)
-            if existing:
-                m.destroy(existing[0])
-            
-            # Créer un fichier temporaire avec la bonne extension
-            import tempfile
-            # Utiliser le suffixe du nom de fichier original pour garantir le format
-            suffix = Path(filename).suffix or ".xlsx"
-            
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-                tmp_file.write(file_content)
-                tmp_path = tmp_file.name
-            
-            try:
-                # Upload vers Mega avec le nom de fichier original
-                # Copier le fichier temporaire vers le nom final avant upload
-                final_path = os.path.join(os.path.dirname(tmp_path), filename)
-                os.rename(tmp_path, final_path)
-                m.upload(final_path, folder[0])
-                os.remove(final_path)
-                return True
-            except Exception as e:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-                st.error(f"Erreur upload Mega : {e}")
-                return False
-        except Exception as e:
-            st.error(f"Erreur lors de l'upload : {e}")
-            return False
+
 
 
 class ExcelStyler:
@@ -516,7 +453,6 @@ class DataProcessor:
             for uploaded_file in uploaded_files:
                 file_results = {"filename": uploaded_file.name, "sheets": []}
                 try:
-                    uploaded_file.seek(0)
                     sheets_dict = DataProcessor.load_data(uploaded_file)
                     for sheet_name, df in sheets_dict.items():
                         total_rows = len(df)
@@ -760,16 +696,6 @@ class UIComponents:
             
             # st.info("Les index sont sauvegardés localement dans votre dossier utilisateur.")
             
-            # Connexion Mega.nz
-            st.markdown("---")
-            st.markdown("### ☁️ Cloud Mega.nz")
-            mega_client = MegaManager.get_mega_client()
-            if mega_client:
-                st.success("Connecté à Mega.nz")
-            else:
-                st.warning("Non connecté")
-                st.caption("Configurez vos identifiants pour l'export cloud.")
-            
             st.markdown("---")
             if st.button("🔄 Réinitialiser la session", use_container_width=True):
                 for key in list(st.session_state.keys()):
@@ -896,7 +822,7 @@ class DataHubApp:
         with s1:
             st.markdown(f"""
             <div class="stat-card">
-                <div class="stat-val">{total_in}</div>
+                <div class="stat-val">{{total_in}}</div>
                 <div class="stat-label">Lignes Entrantes</div>
             </div>
             """, unsafe_allow_html=True)
@@ -904,7 +830,7 @@ class DataHubApp:
         with s2:
             st.markdown(f"""
             <div class="stat-card">
-                <div class="stat-val" style="color:{SUCCESS_COLOR};">{total_out}</div>
+                <div class="stat-val" style="color:{SUCCESS_COLOR};">{{total_out}}</div>
                 <div class="stat-label">Lignes Uniques</div>
             </div>
             """, unsafe_allow_html=True)
@@ -912,7 +838,7 @@ class DataHubApp:
         with s3:
             st.markdown(f"""
             <div class="stat-card">
-                <div class="stat-val" style="color:{DANGER_COLOR};">{total_in - total_out}</div>
+                <div class="stat-val" style="color:{DANGER_COLOR};">{{total_in - total_out}}</div>
                 <div class="stat-label">Doublons Éliminés</div>
             </div>
             """, unsafe_allow_html=True)
@@ -947,8 +873,9 @@ class DataHubApp:
                     )
                     if success:
                         st.success(f"Données fusionnées avec succès dans `{fname}`")
-                        st.session_state.page = "Index"
-                        st.rerun()
+                        if st.button("Voir la bibliothèque", use_container_width=True):
+                            st.session_state.page = "Index"
+                            st.rerun()
                     else:
                         st.error("Erreur lors de la fusion de l'index.")
         
@@ -1006,7 +933,7 @@ class DataHubApp:
                 st.info(f"Il vous reste {total - completed} tâches pour clôturer la journée.")
         
         with col_info2:
-            if st.button("🚀 Aller au Traitement", use_container_width=True, type="primary"):
+            if st.button("?? Aller au Traitement", use_container_width=True, type="primary"):
                 st.session_state.page = "Traitement"
                 st.rerun()
 
@@ -1036,14 +963,16 @@ class DataHubApp:
                             st.download_button("Télécharger", content, idx_name, key=f"dl_{idx_name}", use_container_width=True)
                     
                     with c3:
-                        if st.button("☁️ Mega", key=f"mg_{idx_name}", help="Envoyer vers Mega.nz"):
-                            content = self.file_manager.get_local_index(idx_name)
-                            if content:
-                                with st.spinner("Upload..."):
-                                    if MegaManager.upload_to_mega(content, idx_name):
-                                        st.success("Upload réussi !")
-                                    else:
-                                        st.error("Échec de l'upload.")
+                        content_dl = self.file_manager.get_local_index(idx_name)
+                        if content_dl:
+                            st.download_button(
+                                label="📥 Exporter",
+                                data=content_dl,
+                                file_name=idx_name,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key=f"exp_{idx_name}",
+                                use_container_width=True,
+                            )
                     
                     with c4:
                         if st.button("Supprimer", key=f"del_{idx_name}"):
