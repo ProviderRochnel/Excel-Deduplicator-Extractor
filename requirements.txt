@@ -2,5 +2,6 @@ streamlit
 pandas
 openpyxl
 numpy
-pycryptodome==3.16.0
+pycryptodome>=3.9.6
+tenacity<6.0.0
 mega.py
