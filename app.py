@@ -20,14 +20,14 @@ from openpyxl.utils import get_column_letter
 
 # Configuration des traitements par catégorie
 COLUMNS_CONFIG = {
-    "Facturation Achat": {
+    "Achat": {
         "extract_only": False,
         "description": "Optimisation des achats : extraction des données clés et suppression automatique des doublons de facturation.",
         "tooltip": "Idéal pour consolider vos bons de commande et éviter les doubles paiements.",
         "columns": ["Date", "Products", "Quantity ordered", "Price", "Order number"],
         "rename": {"Price": "Prix Achat HT", "Order number": "N° Facture"},
     },
-    "Facturation Client": {
+    "Vente": {
         "extract_only": True,
         "description": "Préparation des données clients : extraction exhaustive pour analyse de facturation et logistique.",
         "tooltip": "Préparez vos fichiers pour la livraison et le suivi commercial.",
@@ -54,7 +54,7 @@ COLUMNS_CONFIG = {
         "rename": {"Id": "N° Identification", "From": "Provenance", "To name": "To handler name"},
         "extra_columns": ["Vendeur", "Compte", "Tournée"],
     },
-    "FICHIER DES RISTOURNES": {
+    "Ristournes": {
         "extract_only": True,
         "description": "Calcul des ristournes : récapitulatif structuré des remises quotidiennes par magasin.",
         "tooltip": "Générez vos états de remises sur ventes en quelques secondes.",
@@ -62,7 +62,7 @@ COLUMNS_CONFIG = {
         "rename": {},
         "extra_columns": [],
     },
-    "BASE MAGASIN": {
+    "Mouvement de stock": {
         "extract_only": False,
         "description": "Mouvements de stock : analyse fine des opérations magasin (Chargement, Déchargement, etc.) et suppression automatique des doublons.",
         "tooltip": "Découpe automatiquement vos documents en Opérations et Comptes.",
@@ -97,44 +97,46 @@ COLUMNS_CONFIG = {
         },
         "extra_columns": ["Route", "Tournée"],
     },
-    "FICHIER DES INVENTAIRES": {
+    "Inventaires": {
         "extract_only": True,
         "description": "Clôture journalière : nettoyage des stocks nuls et calcul des écarts d'inventaire.",
         "tooltip": "Supprime automatiquement les lignes sans stock pour un inventaire clair.",
-        "columns": ["Date", "Code Article", "Conditionnement", "Nom Article", "Quantité Initiale", "Quantité Comptée", "Valeur Stock"],
+        # FIX 1: "Valeur Stock" retiré des colonnes extraites (non présente dans le fichier source).
+        # FIX 1b: extra_columns corrigé → colonne vide "Valeur Stock  PV TTC 2%" ajoutée en sortie.
+        "columns": ["Date", "Code Article", "Conditionnement", "Nom Article", "Quantité Initiale", "Quantité Comptée"],
         "rename": {},
-        "extra_columns": ["PV TTC 2%"],
+        "extra_columns": ["Valeur Stock  PV TTC 2%"],
     }
 }
 
 # Configuration des tâches quotidiennes avec icônes améliorées
 DAILY_TASKS_CONFIG = {
     "Inventaire": {
-        "category": "FICHIER DES INVENTAIRES",
+        "category": "Inventaires",
         "icon": "📋",
         "description": "Clôture journalière des stocks",
         "priority": 1
     },
     "Données Magasin": {
-        "category": "BASE MAGASIN", 
+        "category": "Mouvement de stock", 
         "icon": "🏪",
         "description": "Mouvements de stock du jour",
         "priority": 2
     },
     "Ristourne": {
-        "category": "FICHIER DES RISTOURNES",
+        "category": "Ristournes",
         "icon": "💰", 
         "description": "Calcul des ristournes quotidiennes",
         "priority": 3
     },
     "Vente": {
-        "category": "Facturation Client",
-        "icon": "🤝",
+        "category": "Vente",
+        "icon": "👥",
         "description": "Facturation clients du jour", 
         "priority": 4
     },
     "Achat": {
-        "category": "Facturation Achat",
+        "category": "Achat",
         "icon": "🛒",
         "description": "Facturation achats du jour",
         "priority": 5
@@ -169,17 +171,13 @@ class FileManager:
         user_folder = Path.home()
         index_folder = user_folder / "DataHub_Index"
         
-        # Vérifier si le dossier existe déjà
         if index_folder.exists():
             if index_folder.is_dir():
-                # Le dossier existe déjà, ne rien faire
                 pass
             else:
-                # Un fichier existe avec ce nom, le supprimer
                 index_folder.unlink(missing_ok=True)
                 index_folder.mkdir(exist_ok=True)
         else:
-            # Créer le dossier
             index_folder.mkdir(exist_ok=True)
         
         return index_folder
@@ -354,18 +352,18 @@ class DataProcessor:
             df["Code"] = df.iloc[:, 6]
         
         # Colonnes disponibles avec correspondance flexible pour INVENTAIRES
-        if file_type == "FICHIER DES INVENTAIRES":
+        if file_type == "Inventaires":
             # Correspondance flexible pour les noms de colonnes
+            # Gère les variantes typographiques du fichier source (typos, espaces, retours à la ligne)
             column_mapping = {
                 "Code Article": ["Code Article", "Code", "CodeArt", "Article Code", "Ref Article"],
                 "Conditionnement": ["Conditionnement", "Conidtionnement", "Conidtionnement ","Cond", "Packaging", "Format"],
                 "Nom Article": ["Nom Article", "Article", "Produit", "Désignation", "Nom Produit"],
                 "Quantité Initiale": ["Quantité  Initiale", "Quantité Initiale", "Qte Initiale", "Stock Initial", "Qte Init"],
                 "Quantité Comptée": ["Quantité Comptée", "Qte Comptée", "Stock Compté", "Qte Compte"],
-                "Valeur Stock": ["Valeur Stock", "Valeur Stock  PV TTC 2%", "Valeur Stock PV TTC 2%", "Valeur PV TTC", "Valeur Stock"],
             }
             
-            # On s'assure que la colonne Date existe si elle a été injectée par _process_inventaires
+            # Injecter la date si elle n'est pas encore dans le DataFrame
             if "Date" not in df.columns and date_str:
                 df.insert(0, "Date", date_str)
 
@@ -383,7 +381,7 @@ class DataProcessor:
                 if found_col:
                     if found_col != expected_col:
                         df = df.rename(columns={found_col: expected_col})
-                    available.append(expected_col)  # toujours le nom final après renommage
+                    available.append(expected_col)
         else:
             available = [c for c in expected if c in df.columns]
         
@@ -391,14 +389,12 @@ class DataProcessor:
         df_out = df[available].copy()
         
         # Traitements spécifiques par type
-        if file_type == "FICHIER DES INVENTAIRES":
-            # Validation : vérifier que c'est vraiment un inventaire
+        if file_type == "Inventaires":
             if not DataProcessor._validate_inventory_data(df_out):
-                # Si ce n'est pas un inventaire, retourner un DataFrame vide
                 df_out = pd.DataFrame()
             else:
                 df_out = DataProcessor._process_inventaires(df_out, date_str=date_str)
-        elif file_type == "BASE MAGASIN":
+        elif file_type == "Mouvement de stock":
             df_out = DataProcessor._process_base_magasin(df_out)
         elif file_type == "STOCKS DES PRODUITS":
             df_out = DataProcessor._process_stocks(df_out)
@@ -413,18 +409,18 @@ class DataProcessor:
     
     @staticmethod
     def _extract_inventaire_date(uploaded_file) -> Optional[str]:
-        """Extrait la date/heure depuis la cellule A3 du fichier inventaire.
-        Format attendu en A3: 'DATE & HEURE: 02/04/2026 06H33'
+        """Extrait la date/heure depuis la cellule A4 du fichier inventaire.
+        Format attendu en A4: 'DATE & HEURE: 02/04/2026 06H33'
         """
         try:
             uploaded_file.seek(0)
             wb = load_workbook(uploaded_file, data_only=True, read_only=True)
             ws = wb.active
-            cell_a3 = ws["A4"].value
+            cell_a4 = ws["A4"].value
             wb.close()
             uploaded_file.seek(0)
-            if cell_a3:
-                cell_str = str(cell_a3).strip()
+            if cell_a4:
+                cell_str = str(cell_a4).strip()
                 match = re.search(r'(\d{2}/\d{2}/\d{4})\s+(\d{2}[Hh:]\d{2})', cell_str, re.IGNORECASE)
                 if match:
                     date_part = match.group(1)
@@ -443,30 +439,22 @@ class DataProcessor:
         if df.empty:
             return False
         
-        # Vérifier les colonnes essentielles pour un inventaire
         required_cols = ["Code Article", "Nom Article"]
         inventory_cols = ["Quantité Initiale", "Quantité Comptée", "Valeur Ecart"]
         
-        # Au moins une colonne d'identification doit exister
         has_identification = any(col in df.columns for col in required_cols)
         if not has_identification:
             return False
         
-        # Au moins une colonne de quantité doit exister
         has_quantity = any(col in df.columns for col in inventory_cols)
         if not has_quantity:
             return False
         
-        # Vérifier que les données ressemblent à un inventaire
-        # Pas de valeurs qui ressemblent à des montants de facturation
         sample_data = df.head(10)
-        
-        # Vérifier s'il y a des codes articles (typiquement numériques ou alphanumériques courts)
         if "Code Article" in df.columns:
             code_sample = sample_data["Code Article"].dropna().astype(str)
-            # Les codes articles ne devraient pas ressembler à des montants monétaires
             monetary_pattern = code_sample.str.match(r'^\d{1,3}[\s,]?\d{3}[\s,]?\d{3}$')
-            if monetary_pattern.sum() > len(code_sample) * 0.5:  # Plus de 50% ressemblent à des montants
+            if monetary_pattern.sum() > len(code_sample) * 0.5:
                 return False
         
         return True
@@ -474,13 +462,14 @@ class DataProcessor:
     @staticmethod
     def _process_inventaires(df: pd.DataFrame, date_str: str) -> pd.DataFrame:
         """Traitement spécifique pour les inventaires.
-        - Supprime lignes où Qté Initiale ET Qté Comptée sont nulles (0 ou NaN).
-        - Injecte la date extraite de A3 en première colonne si pas déjà présente.
+        - Supprime les lignes où Quantité Initiale ET Quantité Comptée sont toutes deux à zéro.
+        - Les lignes avec au moins une quantité non nulle sont CONSERVÉES (pas de perte de données).
+        - Injecte la date extraite de A4 en colonne Date.
         """
         if "Quantité Initiale" in df.columns and "Quantité Comptée" in df.columns:
             qi = pd.to_numeric(df["Quantité Initiale"], errors="coerce").fillna(0)
             qc = pd.to_numeric(df["Quantité Comptée"], errors="coerce").fillna(0)
-            # On ne garde que les lignes où au moins une des deux quantités est non nulle
+            # Conserver toute ligne où au moins une quantité est non nulle
             df = df[~((qi == 0) & (qc == 0))].copy()
         
         if "Date" not in df.columns:
@@ -515,7 +504,6 @@ class DataProcessor:
         else:
             df["Compte"] = ""
         
-        # Suppression des doublons sur les colonnes métier clés
         dedup_cols = [c for c in ["Product", "Change date", "Prev. quantity", "Cur. quantity", "Change source", "Document"] if c in df.columns]
         if dedup_cols:
             df = df.drop_duplicates(subset=dedup_cols).reset_index(drop=True)
@@ -537,8 +525,8 @@ class DataProcessor:
     @staticmethod
     def load_data(uploaded_file, file_type: Optional[str] = None) -> Dict[str, pd.DataFrame]:
         """Charge les données depuis un fichier uploadé.
-        Pour FICHIER DES INVENTAIRES, détecte automatiquement la ligne d'en-tête
-        et s'arrête à la ligne contenant 'TOTAL'.
+        Pour le module Inventaires, détecte automatiquement la ligne d'en-tête,
+        ignore les lignes TOTAL (sous-totaux et total final) et s'arrête proprement.
         """
         filename = uploaded_file.name
         if filename.endswith('.csv'):
@@ -549,8 +537,9 @@ class DataProcessor:
                 df = pd.read_csv(uploaded_file, sep=',')
             return {"Données_CSV": df}
         else:
-            if file_type == "FICHIER DES INVENTAIRES":
-                # Lecture directe via openpyxl pour gérer les cellules fusionnées et l'arrêt sur TOTAL
+            # FIX 2 & 3: "FICHIER DES INVENTAIRES" renommé en "Inventaires" pour correspondre
+            # à la clé COLUMNS_CONFIG sélectionnée dans l'interface.
+            if file_type == "Inventaires":
                 uploaded_file.seek(0)
                 wb_inv = load_workbook(uploaded_file, data_only=True)
                 result = {}
@@ -558,7 +547,6 @@ class DataProcessor:
                 for sname in wb_inv.sheetnames:
                     ws_inv = wb_inv[sname]
                     header_row_idx = None
-                    # Recherche de l'en-tête
                     for i, row in enumerate(ws_inv.iter_rows(values_only=True), start=1):
                         vals = [str(v).replace("\n", " ").strip().lower() for v in row if v is not None]
                         if any(k in vals for k in KEYWORDS_INV):
@@ -572,15 +560,13 @@ class DataProcessor:
                             for idx, v in enumerate(headers_raw) if v is not None
                         ]
                         rows_data = []
-                        # Lecture des données avec arrêt sur TOTAL
                         for row in ws_inv.iter_rows(min_row=header_row_idx + 1, values_only=True):
-                            # Vérifier si la ligne contient TOTAL
+                            # Ignorer les lignes TOTAL (sous-totaux par catégorie et total général)
                             row_str = " ".join([str(v) for v in row if v is not None]).upper()
                             if "TOTAL" in row_str:
                                 continue
                             if not any(row):
                                 continue
-                            
                             rows_data.append({h: row[idx] for idx, h in valid_cols})
                         df_clean = pd.DataFrame(rows_data)
                     else:
@@ -603,9 +589,9 @@ class DataProcessor:
             for uploaded_file in uploaded_files:
                 file_results = {"filename": uploaded_file.name, "sheets": []}
                 try:
-                    # Pour INVENTAIRES: extraire la date de la cellule A3 avant le chargement
+                    # FIX 2: extraction de la date calée sur le bon file_type "Inventaires"
                     inv_date_str = None
-                    if file_type == "FICHIER DES INVENTAIRES" and not uploaded_file.name.endswith(".csv"):
+                    if file_type == "Inventaires" and not uploaded_file.name.endswith(".csv"):
                         inv_date_str = DataProcessor._extract_inventaire_date(uploaded_file)
                     
                     sheets_dict = DataProcessor.load_data(uploaded_file, file_type=file_type)
@@ -613,12 +599,6 @@ class DataProcessor:
                         total_rows = len(df)
                         df_proc, missing, final_cols = DataProcessor.filter_columns(df, sheet_name, file_type, date_str=inv_date_str)
                         
-                        # Ajout des colonnes de traçabilité (uniquement si ce n'est pas un inventaire)
-                        if file_type != "FICHIER DES INVENTAIRES":
-                            df_proc[TRACE_COLS[0]] = uploaded_file.name
-                            df_proc[TRACE_COLS[1]] = datetime.now().strftime("%d/%m/%Y %H:%M")
-                        
-                        # Calcul des doublons
                         if file_type in COLUMNS_CONFIG:
                             extract_only = COLUMNS_CONFIG[file_type].get("extract_only", False)
                         else:
@@ -631,12 +611,10 @@ class DataProcessor:
                             unique_rows = len(df_temp)
                             duplicate_rows = len(df_proc) - unique_rows
                         
-                        # Écriture dans Excel
                         safe_sheet_name = re.sub(r'[\\/*?:\[\]]', '_', f"{uploaded_file.name[:20]}_{sheet_name[:10]}")
                         df_proc.to_excel(writer, sheet_name=safe_sheet_name, index=False)
                         sheets_written += 1
                         
-                        # Application des styles
                         ws = writer.sheets[safe_sheet_name]
                         ExcelStyler.apply_header_style(ws, len(df_proc.columns))
                         ExcelStyler.apply_auto_width(ws)
@@ -653,7 +631,6 @@ class DataProcessor:
                 
                 all_results.append(file_results)
             
-            # Garde-fou : openpyxl exige au moins une feuille visible dans le classeur
             if sheets_written == 0:
                 pd.DataFrame({"Info": ["Aucune donnée traitée — vérifiez le format du fichier source."]}).to_excel(
                     writer, sheet_name="Résultat", index=False
@@ -673,10 +650,8 @@ class IndexManager:
             new_data_io = io.BytesIO(processed_bytes)
             new_df_dict = pd.read_excel(new_data_io, sheet_name=None)
             
-            # Combiner toutes les feuilles du nouveau traitement en un seul DF
             new_df = pd.concat(new_df_dict.values(), ignore_index=True)
             
-            # Récupérer l'index existant
             existing_content = FileManager.get_local_index(filename)
             if existing_content:
                 existing_df = pd.read_excel(io.BytesIO(existing_content))
@@ -684,12 +659,9 @@ class IndexManager:
             else:
                 final_df = new_df
             
-            # Supprimer les doublons sur l'index global
-            # On garde la dernière occurrence pour mettre à jour les données si besoin
             subset_cols = [c for c in final_df.columns if c not in TRACE_COLS]
             final_df = final_df.drop_duplicates(subset=subset_cols, keep='last')
             
-            # Sauvegarder
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 final_df.to_excel(writer, index=False, sheet_name=INDEX_SHEET_NAME)
@@ -844,7 +816,6 @@ class UIComponents:
         with st.sidebar:
             st.markdown(f"<h2 style='color:{PRIMARY_COLOR};'>Centre de Contrôle</h2>", unsafe_allow_html=True)
             
-            # Navigation
             if st.button("📊 Traitement des fichiers", use_container_width=True):
                 st.session_state.page = "Traitement"
                 st.rerun()
@@ -883,7 +854,6 @@ class DataHubApp:
         if 'page' not in st.session_state:
             st.session_state.page = "Traitement"
         
-        # Création proactive du dossier
         try:
             FileManager.get_index_folder()
         except Exception as e:
@@ -932,7 +902,6 @@ class DataHubApp:
             )
             
             if uploaded_files:
-                # Validation : le traitement n'est possible que si une catégorie est sélectionnée
                 button_disabled = not file_type
                 if button_disabled:
                     st.warning("Veuillez sélectionner une catégorie de traitement avant de lancer l'analyse.")
@@ -945,7 +914,6 @@ class DataHubApp:
                             st.session_state.results = results
                             st.session_state.current_file_type = file_type
                             
-                            # Marquer automatiquement la tâche quotidienne
                             if file_type:
                                 for task_name, task_config in DAILY_TASKS_CONFIG.items():
                                     if task_config["category"] == file_type:
@@ -959,7 +927,6 @@ class DataHubApp:
             
             st.markdown('</div>', unsafe_allow_html=True)
         
-        # Affichage des résultats
         if st.session_state.results:
             self._render_results_section()
     
@@ -973,7 +940,6 @@ class DataHubApp:
             </div>
         """, unsafe_allow_html=True)
         
-        # Statistiques
         total_in = sum(sum(s['total_rows'] for s in f['sheets']) for f in st.session_state.results)
         total_out = sum(sum(s['unique_rows'] for s in f['sheets']) for f in st.session_state.results)
         
@@ -1051,14 +1017,13 @@ class DataHubApp:
         st.markdown('</div>', unsafe_allow_html=True)
 
     def render_daily_tasks_page(self) -> None:
-        """Affiche la page des tâches quotidiennes avec un design amélioré"""
+        """Affiche la page des tâches quotidiennes"""
         st.markdown("<h1>Suivi des Tâches Quotidiennes</h1>", unsafe_allow_html=True)
         
         completed, total = self.task_manager.get_progress()
         progress_percent = (completed / total) * 100 if total > 0 else 0
         today_str = datetime.now().strftime("%A %d %B %Y")
         
-        # En-tête de progression
         col_head1, col_head2 = st.columns([2, 1])
         with col_head1:
             st.markdown(f"### {today_str}")
@@ -1069,7 +1034,6 @@ class DataHubApp:
         st.progress(progress_percent / 100)
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # Liste des tâches avec nouveau design
         for task_name, task_config in sorted(DAILY_TASKS_CONFIG.items(), key=lambda x: x[1]["priority"]):
             is_completed = self.task_manager.is_task_completed(task_name)
             
@@ -1093,7 +1057,6 @@ class DataHubApp:
         
         st.markdown("---")
         
-        # Section Info & Action
         col_info1, col_info2 = st.columns([1, 1])
         with col_info1:
             if completed == total:
