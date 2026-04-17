@@ -50,7 +50,7 @@ COLUMNS_CONFIG = {
         "extract_only": True,
         "description": "Traitement des flux mobiles (Momo) : conversion CSV/Excel et normalisation des transactions.",
         "tooltip": "Traitez vos rapports d'opérations mobiles en un clic.",
-        "columns": ["Id", "Date", "Status", "Type", "From", "To name", "Amount", "Balance"],
+        "columns": ["Id", "Date", "Status", "Type", "From", "To","To name", "Amount", "Balance"],
         "rename": {"Id": "N° Identification", "From": "Provenance", "To name": "To handler name"},
         "extra_columns": ["Vendeur", "Compte", "Tournée"],
     },
