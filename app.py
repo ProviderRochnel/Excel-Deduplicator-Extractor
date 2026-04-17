@@ -392,7 +392,12 @@ class DataProcessor:
         
         # Traitements spécifiques par type
         if file_type == "FICHIER DES INVENTAIRES":
-            df_out = DataProcessor._process_inventaires(df_out, date_str=date_str)
+            # Validation : vérifier que c'est vraiment un inventaire
+            if not DataProcessor._validate_inventory_data(df_out):
+                # Si ce n'est pas un inventaire, retourner un DataFrame vide
+                df_out = pd.DataFrame()
+            else:
+                df_out = DataProcessor._process_inventaires(df_out, date_str=date_str)
         elif file_type == "BASE MAGASIN":
             df_out = DataProcessor._process_base_magasin(df_out)
         elif file_type == "STOCKS DES PRODUITS":
@@ -433,7 +438,41 @@ class DataProcessor:
         return None
 
     @staticmethod
-    def _process_inventaires(df: pd.DataFrame, date_str=None) -> pd.DataFrame:
+    def _validate_inventory_data(df: pd.DataFrame) -> bool:
+        """Valide que les données sont vraiment un inventaire"""
+        if df.empty:
+            return False
+        
+        # Vérifier les colonnes essentielles pour un inventaire
+        required_cols = ["Code Article", "Nom Article"]
+        inventory_cols = ["Quantité Initiale", "Quantité Comptée", "Valeur Ecart"]
+        
+        # Au moins une colonne d'identification doit exister
+        has_identification = any(col in df.columns for col in required_cols)
+        if not has_identification:
+            return False
+        
+        # Au moins une colonne de quantité doit exister
+        has_quantity = any(col in df.columns for col in inventory_cols)
+        if not has_quantity:
+            return False
+        
+        # Vérifier que les données ressemblent à un inventaire
+        # Pas de valeurs qui ressemblent à des montants de facturation
+        sample_data = df.head(10)
+        
+        # Vérifier s'il y a des codes articles (typiquement numériques ou alphanumériques courts)
+        if "Code Article" in df.columns:
+            code_sample = sample_data["Code Article"].dropna().astype(str)
+            # Les codes articles ne devraient pas ressembler à des montants monétaires
+            monetary_pattern = code_sample.str.match(r'^\d{1,3}[\s,]?\d{3}[\s,]?\d{3}$')
+            if monetary_pattern.sum() > len(code_sample) * 0.5:  # Plus de 50% ressemblent à des montants
+                return False
+        
+        return True
+    
+    @staticmethod
+    def _process_inventaires(df: pd.DataFrame, date_str: str) -> pd.DataFrame:
         """Traitement spécifique pour les inventaires.
         - Supprime lignes où Qté Initiale ET Qté Comptée sont nulles (0 ou NaN).
         - Injecte la date extraite de A3 en première colonne si pas déjà présente.
