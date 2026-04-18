@@ -10,11 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 
-CRYPTO_AVAILABLE = True  # megapy gère le chiffrement en interne
-try:
-    from mega import Mega as _MegaTest
-except ImportError:
-    CRYPTO_AVAILABLE = False
+
 
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -1120,11 +1116,6 @@ class DataHubApp:
         with st.sidebar:
             st.markdown("---")
             st.markdown(f"<h3 style='color:{PRIMARY_COLOR};'>☁️ Mega.nz</h3>", unsafe_allow_html=True)
-            
-            if not CRYPTO_AVAILABLE:
-                st.warning("⚠️ `pycryptodome` manquant. Ajoutez-le dans requirements.txt pour activer l'envoi Mega.")
-                return
-            
             with st.expander("🔐 Identifiants Mega", expanded=False):
                 mega_email = st.text_input("Email Mega", key="mega_email", placeholder="user@exemple.com")
                 mega_pwd   = st.text_input("Mot de passe", key="mega_pwd", type="password")
@@ -1187,7 +1178,7 @@ class DataHubApp:
                             )
                     
                     with c3:
-                        mega_enabled = CRYPTO_AVAILABLE and st.session_state.get("mega_creds") is not None
+                        mega_enabled = st.session_state.get("mega_creds") is not None
                         if st.button(
                             "☁️ Envoyer Mega",
                             key=f"mega_{idx_name}",
