@@ -5,9 +5,16 @@ import os
 import re
 import numpy as np
 import json
+import requests
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
+
+CRYPTO_AVAILABLE = True  # megapy gère le chiffrement en interne
+try:
+    from mega import Mega as _MegaTest
+except ImportError:
+    CRYPTO_AVAILABLE = False
 
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -232,6 +239,45 @@ class FileManager:
         except Exception as e:
             st.error(f"Erreur lors de la suppression : {e}")
             return False
+
+
+class MegaUploader:
+    """Upload vers Mega.nz via megapy (fork stable, compatible Streamlit Cloud).
+    Installation : pip install megapy
+    """
+
+    def __init__(self, email: str, password: str):
+        self.email = email
+        self.password = password
+        self._client = None
+
+    def _get_client(self):
+        if self._client is None:
+            try:
+                from mega import Mega
+            except ImportError:
+                raise RuntimeError(
+                    "`megapy` n'est pas installé. "
+                    "Ajoutez `megapy` dans requirements.txt et relancez l'application."
+                )
+            self._client = Mega().login(self.email, self.password)
+        return self._client
+
+    def login(self) -> bool:
+        self._get_client()
+        return True
+
+    def upload(self, file_bytes: bytes, filename: str, parent_node=None) -> str:
+        import tempfile, os
+        client = self._get_client()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{filename}") as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+        try:
+            file_node = client.upload(tmp_path, dest_filename=filename)
+            return client.get_upload_link(file_node)
+        finally:
+            os.unlink(tmp_path)
 
 
 class DailyTaskManager:
@@ -1069,9 +1115,51 @@ class DataHubApp:
                 st.session_state.page = "Traitement"
                 st.rerun()
 
+    def _render_mega_config(self) -> None:
+        """Affiche le panneau de configuration Mega dans la sidebar"""
+        with st.sidebar:
+            st.markdown("---")
+            st.markdown(f"<h3 style='color:{PRIMARY_COLOR};'>☁️ Mega.nz</h3>", unsafe_allow_html=True)
+            
+            if not CRYPTO_AVAILABLE:
+                st.warning("⚠️ `pycryptodome` manquant. Ajoutez-le dans requirements.txt pour activer l'envoi Mega.")
+                return
+            
+            with st.expander("🔐 Identifiants Mega", expanded=False):
+                mega_email = st.text_input("Email Mega", key="mega_email", placeholder="user@exemple.com")
+                mega_pwd   = st.text_input("Mot de passe", key="mega_pwd", type="password")
+                if mega_email and mega_pwd:
+                    st.session_state["mega_creds"] = (mega_email, mega_pwd)
+                    st.success("Identifiants enregistrés pour cette session.")
+                elif "mega_creds" not in st.session_state:
+                    st.info("Renseignez vos identifiants pour activer l'envoi vers Mega.")
+
+    def _upload_to_mega(self, file_bytes: bytes, filename: str) -> Optional[str]:
+        """Lance l'upload d'un fichier vers Mega et retourne le lien public."""
+        creds = st.session_state.get("mega_creds")
+        if not creds:
+            st.error("Identifiants Mega non configurés. Renseignez-les dans la barre latérale.")
+            return None
+        
+        email, pwd = creds
+        try:
+            uploader = MegaUploader(email, pwd)
+            with st.spinner(f"Connexion à Mega…"):
+                uploader.login()
+            with st.spinner(f"Envoi de {filename} vers Mega…"):
+                link = uploader.upload(file_bytes, filename)
+            return link
+        except RuntimeError as e:
+            st.error(f"Erreur Mega : {e}")
+            return None
+        except Exception as e:
+            st.error(f"Erreur inattendue lors de l'upload : {e}")
+            return None
+
     def render_index_page(self) -> None:
         """Affiche la page de la bibliothèque d'index"""
         st.markdown("<h1>📚 Bibliothèque des Index</h1>", unsafe_allow_html=True)
+        self._render_mega_config()
         
         try:
             indexes = self.file_manager.list_local_indexes()
@@ -1084,18 +1172,45 @@ class DataHubApp:
         else:
             for idx_name in sorted(indexes):
                 with st.expander(f"📄 {idx_name}", expanded=False):
-                    c1, c2, c3 = st.columns([2, 1, 1])
+                    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
                     with c1:
                         cat = idx_name.replace('index_', '').replace('.xlsx', '').replace('_', ' ')
                         st.markdown(f"**Catégorie** : {cat}")
                     
+                    content = self.file_manager.get_local_index(idx_name)
+
                     with c2:
-                        content = self.file_manager.get_local_index(idx_name)
                         if content:
-                            st.download_button("Télécharger", content, idx_name, key=f"dl_{idx_name}", use_container_width=True)
+                            st.download_button(
+                                "⬇️ Télécharger", content, idx_name,
+                                key=f"dl_{idx_name}", use_container_width=True
+                            )
                     
                     with c3:
-                        if st.button("Supprimer", key=f"del_{idx_name}"):
+                        mega_enabled = CRYPTO_AVAILABLE and st.session_state.get("mega_creds") is not None
+                        if st.button(
+                            "☁️ Envoyer Mega",
+                            key=f"mega_{idx_name}",
+                            use_container_width=True,
+                            disabled=not (content and mega_enabled),
+                            help="Configurez vos identifiants Mega dans la barre latérale" if not mega_enabled else None
+                        ):
+                            link = self._upload_to_mega(content, idx_name)
+                            if link:
+                                st.success(f"✅ Fichier envoyé !")
+                                st.markdown(f"[🔗 Ouvrir sur Mega]({link})", unsafe_allow_html=False)
+                                # Mémoriser le lien pour cet index
+                                st.session_state[f"mega_link_{idx_name}"] = link
+                        
+                        # Afficher le dernier lien si disponible
+                        if f"mega_link_{idx_name}" in st.session_state:
+                            st.markdown(
+                                f"[🔗 Dernier lien]({st.session_state[f'mega_link_{idx_name}']})",
+                                unsafe_allow_html=False
+                            )
+
+                    with c4:
+                        if st.button("🗑️ Supprimer", key=f"del_{idx_name}", use_container_width=True):
                             if self.file_manager.delete_index(idx_name):
                                 st.rerun()
 
