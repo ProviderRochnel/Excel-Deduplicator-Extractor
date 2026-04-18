@@ -3,11 +3,16 @@ import pandas as pd
 import io
 import os
 import re
+import struct
+import base64
 import numpy as np
 import json
+import requests
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
+
+
 
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -232,6 +237,83 @@ class FileManager:
         except Exception as e:
             st.error(f"Erreur lors de la suppression : {e}")
             return False
+
+
+class GoogleDriveUploader:
+    """Upload vers Google Drive via l'API officielle et un compte de service.
+    Dépendances : google-api-python-client, google-auth (dans requirements.txt).
+    Configuration : fichier JSON du compte de service + ID du dossier Drive cible.
+    """
+
+    def __init__(self, service_account_info: dict, folder_id: str):
+        """
+        Args:
+            service_account_info: Contenu du fichier JSON du compte de service (déjà parsé).
+            folder_id: ID du dossier Google Drive où uploader les fichiers.
+        """
+        self.service_account_info = service_account_info
+        self.folder_id = folder_id
+        self._service = None
+
+    def _build_service(self):
+        """Construit le service Google Drive authentifié."""
+        try:
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+            SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+            creds = service_account.Credentials.from_service_account_info(
+                self.service_account_info, scopes=SCOPES
+            )
+            self._service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        except ImportError:
+            raise RuntimeError(
+                "Packages manquants. Installez : pip install google-api-python-client google-auth"
+            )
+        except Exception as e:
+            raise RuntimeError(f"Échec d'authentification Google Drive : {e}")
+
+    def upload(self, file_bytes: bytes, filename: str) -> str:
+        """Upload un fichier et retourne son lien de partage public.
+
+        Args:
+            file_bytes: Contenu du fichier en bytes.
+            filename: Nom du fichier sur Drive.
+
+        Returns:
+            URL de partage Google Drive.
+        """
+        from googleapiclient.http import MediaIoBaseUpload
+
+        if self._service is None:
+            self._build_service()
+
+        # Détecter le MIME type selon l'extension
+        mime_type = (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            if filename.endswith(".xlsx") else "application/octet-stream"
+        )
+
+        file_metadata = {
+            "name": filename,
+            "parents": [self.folder_id],
+        }
+        media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype=mime_type, resumable=False)
+
+        uploaded = self._service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id, webViewLink"
+        ).execute()
+
+        file_id = uploaded.get("id")
+
+        # Rendre le fichier accessible à toute personne disposant du lien
+        self._service.permissions().create(
+            fileId=file_id,
+            body={"type": "anyone", "role": "reader"},
+        ).execute()
+
+        return uploaded.get("webViewLink", f"https://drive.google.com/file/d/{file_id}/view")
 
 
 class DailyTaskManager:
@@ -1069,33 +1151,108 @@ class DataHubApp:
                 st.session_state.page = "Traitement"
                 st.rerun()
 
+    def _render_gdrive_config(self) -> None:
+        """Affiche le panneau de configuration Google Drive dans la sidebar"""
+        with st.sidebar:
+            st.markdown("---")
+            st.markdown(f"<h3 style='color:{PRIMARY_COLOR};'>☁️ Google Drive</h3>", unsafe_allow_html=True)
+            with st.expander("🔐 Configuration Google Drive", expanded=False):
+                uploaded_sa = st.file_uploader(
+                    "Fichier JSON compte de service",
+                    type=["json"],
+                    key="gdrive_sa_file",
+                    help="Téléchargez le fichier JSON du compte de service Google Cloud."
+                )
+                folder_id = st.text_input(
+                    "ID du dossier Drive",
+                    key="gdrive_folder_id",
+                    placeholder="1AbCdEfGhIjKlMnOpQrStUvWxYz",
+                    help="Copiez l'ID depuis l'URL du dossier Drive partagé avec le compte de service."
+                )
+                if uploaded_sa and folder_id:
+                    try:
+                        sa_info = json.loads(uploaded_sa.read().decode("utf-8"))
+                        st.session_state["gdrive_creds"] = (sa_info, folder_id)
+                        st.success(f"✅ Compte de service : {sa_info.get('client_email', 'configuré')}")
+                    except Exception as e:
+                        st.error(f"Fichier JSON invalide : {e}")
+                elif "gdrive_creds" not in st.session_state:
+                    st.info("Chargez votre fichier JSON et renseignez l'ID du dossier pour activer l'envoi vers Drive.")
+
+    def _upload_to_gdrive(self, file_bytes: bytes, filename: str) -> Optional[str]:
+        """Lance l'upload d'un fichier vers Google Drive et retourne le lien de partage."""
+        creds = st.session_state.get("gdrive_creds")
+        if not creds:
+            st.error("Google Drive non configuré. Chargez votre fichier JSON dans la barre latérale.")
+            return None
+
+        sa_info, folder_id = creds
+        try:
+            uploader = GoogleDriveUploader(sa_info, folder_id)
+            with st.spinner(f"Envoi de {filename} vers Google Drive…"):
+                link = uploader.upload(file_bytes, filename)
+            return link
+        except RuntimeError as e:
+            st.error(f"Erreur Google Drive : {e}")
+            return None
+        except Exception as e:
+            st.error(f"Erreur inattendue lors de l'upload : {e}")
+            return None
+
     def render_index_page(self) -> None:
         """Affiche la page de la bibliothèque d'index"""
         st.markdown("<h1>📚 Bibliothèque des Index</h1>", unsafe_allow_html=True)
-        
+        self._render_gdrive_config()
+
         try:
             indexes = self.file_manager.list_local_indexes()
         except Exception as e:
             st.error(f"Erreur d'accès : {e}")
             indexes = []
-        
+
         if not indexes:
             st.warning("Aucun index trouvé. Traitez des fichiers pour commencer à construire votre base de données.")
         else:
             for idx_name in sorted(indexes):
                 with st.expander(f"📄 {idx_name}", expanded=False):
-                    c1, c2, c3 = st.columns([2, 1, 1])
+                    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
                     with c1:
                         cat = idx_name.replace('index_', '').replace('.xlsx', '').replace('_', ' ')
                         st.markdown(f"**Catégorie** : {cat}")
-                    
+
+                    content = self.file_manager.get_local_index(idx_name)
+
                     with c2:
-                        content = self.file_manager.get_local_index(idx_name)
                         if content:
-                            st.download_button("Télécharger", content, idx_name, key=f"dl_{idx_name}", use_container_width=True)
-                    
+                            st.download_button(
+                                "⬇️ Télécharger", content, idx_name,
+                                key=f"dl_{idx_name}", use_container_width=True
+                            )
+
                     with c3:
-                        if st.button("Supprimer", key=f"del_{idx_name}"):
+                        gdrive_enabled = st.session_state.get("gdrive_creds") is not None
+                        if st.button(
+                            "☁️ Envoyer Drive",
+                            key=f"gdrive_{idx_name}",
+                            use_container_width=True,
+                            disabled=not (content and gdrive_enabled),
+                            help="Configurez Google Drive dans la barre latérale" if not gdrive_enabled else None
+                        ):
+                            link = self._upload_to_gdrive(content, idx_name)
+                            if link:
+                                st.success(f"✅ Fichier envoyé !")
+                                st.markdown(f"[🔗 Ouvrir sur Drive]({link})", unsafe_allow_html=False)
+                                st.session_state[f"gdrive_link_{idx_name}"] = link
+
+                        # Afficher le dernier lien si disponible
+                        if f"gdrive_link_{idx_name}" in st.session_state:
+                            st.markdown(
+                                f"[🔗 Dernier lien]({st.session_state[f'gdrive_link_{idx_name}']})",
+                                unsafe_allow_html=False
+                            )
+
+                    with c4:
+                        if st.button("🗑️ Supprimer", key=f"del_{idx_name}", use_container_width=True):
                             if self.file_manager.delete_index(idx_name):
                                 st.rerun()
 
@@ -1113,7 +1270,7 @@ class DataHubApp:
         elif st.session_state.page == "Index":
             self.render_index_page()
         
-        st.markdown('<div class="footer">DataHub Pro v3.1 | Stockage Local | © 2024</div>', unsafe_allow_html=True)
+        st.markdown('<div class="footer">DataHub Pro v3.2 | Stockage Local + Google Drive | © 2024</div>', unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
