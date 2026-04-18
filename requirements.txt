@@ -3,4 +3,5 @@ pandas
 openpyxl
 numpy
 requests
+pycryptodome
 megapy
