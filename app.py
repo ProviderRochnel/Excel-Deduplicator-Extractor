@@ -3,16 +3,11 @@ import pandas as pd
 import io
 import os
 import re
-import struct
-import base64
 import numpy as np
 import json
-import requests
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
-
-
 
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -237,193 +232,6 @@ class FileManager:
         except Exception as e:
             st.error(f"Erreur lors de la suppression : {e}")
             return False
-
-
-class MegaUploader:
-    """Upload vers Mega.nz — implémentation autonome Python 3.12.
-    Dépendances : pycryptodome, requests (déjà dans requirements.txt).
-    Aucun package mega.py/megapy requis.
-    """
-
-    API_URL = "https://g.api.mega.co.nz/cs"
-
-    def __init__(self, email: str, password: str):
-        self.email    = email
-        self.password = password
-        self.master_key: Optional[List[int]] = None
-        self.sid:        Optional[str]       = None
-        self._seq = 0
-
-    # ── Primitives ─────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _s2a(s: bytes) -> List[int]:
-        s = s + b"\x00" * ((4 - len(s) % 4) % 4)
-        return list(struct.unpack(f">{len(s)//4}I", s))
-
-    @staticmethod
-    def _a2s(a: List[int]) -> bytes:
-        return struct.pack(f">{len(a)}I", *a)
-
-    @staticmethod
-    def _a2b(a: List[int]) -> str:
-        return base64.urlsafe_b64encode(MegaUploader._a2s(a)).rstrip(b"=").decode()
-
-    @staticmethod
-    def _b2a(s: str) -> List[int]:
-        return MegaUploader._s2a(base64.urlsafe_b64decode(s + "=" * ((4 - len(s) % 4) % 4)))
-
-    @staticmethod
-    def _xor(a: List[int], b: List[int]) -> List[int]:
-        return [x ^ y for x, y in zip(a, b)]
-
-    @staticmethod
-    def _aes_enc(key: List[int], data: bytes) -> bytes:
-        from Crypto.Cipher import AES as _AES
-        return _AES.new(MegaUploader._a2s(key), _AES.MODE_CBC, iv=b"\x00"*16).encrypt(data)
-
-    @staticmethod
-    def _aes_dec(key: List[int], data: bytes) -> bytes:
-        from Crypto.Cipher import AES as _AES
-        return _AES.new(MegaUploader._a2s(key), _AES.MODE_CBC, iv=b"\x00"*16).decrypt(data)
-
-    @staticmethod
-    def _aes_ctr(key: List[int], iv: List[int], data: bytes) -> bytes:
-        from Crypto.Cipher import AES as _AES
-        from Crypto.Util import Counter as _Ctr
-        iv_int = int.from_bytes(MegaUploader._a2s(iv[:2] + [0, 0]), "big")
-        ctr = _Ctr.new(128, initial_value=iv_int)
-        return _AES.new(MegaUploader._a2s(key), _AES.MODE_CTR, counter=ctr).encrypt(data)
-
-    # ── Dérivation clé + hash auth ──────────────────────────────────────────
-
-    def _pw_key(self) -> List[int]:
-        p = self.password.encode("utf-8")
-        p += b"\x00" * ((4 - len(p) % 4) % 4)
-        pa = list(struct.unpack(f">{len(p)//4}I", p))
-        key = [0x93C467E3, 0x7DB0C7A4, 0xD1BE3F81, 0x0152CB56]
-        n = len(pa)
-        for _ in range(65536):
-            for i in range(0, max(n, 4), 4):
-                key = self._s2a(self._aes_enc(key, self._a2s([pa[(i+j)%n] for j in range(4)])))
-        return key
-
-    def _stringhash(self, s: str, pw_key: List[int]) -> str:
-        b = s.encode("utf-8")
-        b += b"\x00" * ((4 - len(b) % 4) % 4)
-        ba = list(struct.unpack(f">{len(b)//4}I", b))
-        h = [0, 0, 0, 0]
-        for i, v in enumerate(ba):
-            h[i % 4] ^= v
-        for _ in range(16384):
-            h = self._s2a(self._aes_enc(pw_key, self._a2s(h)))
-        return self._a2b([h[0], h[2]])
-
-    # ── Déchiffrement RSA du csid ───────────────────────────────────────────
-
-    @staticmethod
-    def _rsa_decrypt(csid_b64: str, privk_a32: List[int]) -> str:
-        """Déchiffre le csid avec la clé privée RSA pour obtenir le sid de session."""
-        pad = (4 - len(csid_b64) % 4) % 4
-        csid_raw = base64.urlsafe_b64decode(csid_b64 + "=" * pad)
-
-        def read_mpi(raw: bytes, pos: int):
-            bits = struct.unpack(">H", raw[pos:pos+2])[0]
-            blen = (bits + 7) // 8
-            val  = int.from_bytes(raw[pos+2:pos+2+blen], "big")
-            return val, pos + 2 + blen
-
-        raw_privk = MegaUploader._a2s(privk_a32)
-        pos = 0
-        mpis = []
-        for _ in range(4):
-            val, pos = read_mpi(raw_privk, pos)
-            mpis.append(val)
-        p, q, d, u = mpis
-        n = p * q
-
-        m_int, _ = read_mpi(csid_raw, 0)
-        dec = pow(m_int, d, n)
-        dec_bytes = dec.to_bytes((dec.bit_length() + 7) // 8, "big")
-        return base64.urlsafe_b64encode(dec_bytes[:43]).rstrip(b"=").decode()
-
-    # ── API ─────────────────────────────────────────────────────────────────
-
-    def _api(self, data, sid=None):
-        self._seq += 1
-        params = {"id": self._seq}
-        if sid:
-            params["sid"] = sid
-        r = requests.post(self.API_URL, params=params, json=[data], timeout=30)
-        r.raise_for_status()
-        resp = r.json()
-        if isinstance(resp, list):
-            resp = resp[0]
-        if isinstance(resp, int) and resp < 0:
-            raise RuntimeError(f"Mega API code {resp}")
-        return resp
-
-    # ── Login ───────────────────────────────────────────────────────────────
-
-    def login(self) -> bool:
-        try:
-            pw_key = self._pw_key()
-            uh     = self._stringhash(self.email.lower(), pw_key)
-            res    = self._api({"a": "us", "user": self.email.lower(), "uh": uh})
-
-            if not isinstance(res, dict) or "k" not in res:
-                raise RuntimeError("Identifiants incorrects ou compte non reconnu.")
-
-            self.master_key = self._s2a(self._aes_dec(pw_key, self._a2s(self._b2a(res["k"]))))
-
-            enc_privk = self._s2a(self._aes_dec(self.master_key, self._a2s(self._b2a(res["privk"]))))
-            self.sid  = self._rsa_decrypt(res["csid"], enc_privk)
-            return True
-        except RuntimeError:
-            raise
-        except Exception as e:
-            raise RuntimeError(f"Échec connexion Mega : {e}")
-
-    # ── Upload ──────────────────────────────────────────────────────────────
-
-    def upload(self, file_bytes: bytes, filename: str, parent_node=None) -> str:
-        file_key = list(struct.unpack(">4I", os.urandom(16)))
-        file_iv  = list(struct.unpack(">2I", os.urandom(8)))
-
-        encrypted = self._aes_ctr(file_key, file_iv + [0, 0], file_bytes)
-
-        # MAC
-        mac = [0, 0, 0, 0]
-        for i in range(0, len(file_bytes), 16):
-            block = self._s2a(file_bytes[i:i+16].ljust(16, b"\x00"))
-            mac   = self._s2a(self._aes_enc(file_key, self._a2s(self._xor(mac, block))))
-
-        node_key     = self._xor(file_key, [file_iv[0], file_iv[1], mac[0]^mac[2], mac[1]^mac[3]])
-        enc_node_key = self._s2a(self._aes_enc(self.master_key, self._a2s(node_key)))
-
-        # URL d'upload
-        ul_url = self._api({"a": "u", "s": len(encrypted)}, sid=self.sid)["p"]
-        r = requests.post(ul_url, data=encrypted, timeout=120)
-        r.raise_for_status()
-        handle = r.text.strip()
-
-        # Attributs chiffrés
-        attr = b"MEGA" + json.dumps({"n": filename}).encode()
-        attr += b"\x00" * ((16 - len(attr) % 16) % 16)
-        enc_attr = base64.urlsafe_b64encode(self._aes_enc(file_key, attr)).rstrip(b"=").decode()
-
-        # Nœud parent (racine par défaut)
-        if parent_node is None:
-            root = self._api({"a": "f", "c": 1, "r": 1}, sid=self.sid)
-            parent_node = next(n["h"] for n in root["f"] if n["t"] == 2)
-
-        resp = self._api({
-            "a": "p", "t": parent_node,
-            "n": [{"h": handle, "t": 0, "a": enc_attr, "k": self._a2b(enc_node_key)}],
-        }, sid=self.sid)
-
-        fh = resp["f"][0]["h"]
-        return f"https://mega.nz/file/{fh}#{self._a2b(node_key)}"
 
 
 class DailyTaskManager:
@@ -1261,46 +1069,9 @@ class DataHubApp:
                 st.session_state.page = "Traitement"
                 st.rerun()
 
-    def _render_mega_config(self) -> None:
-        """Affiche le panneau de configuration Mega dans la sidebar"""
-        with st.sidebar:
-            st.markdown("---")
-            st.markdown(f"<h3 style='color:{PRIMARY_COLOR};'>☁️ Mega.nz</h3>", unsafe_allow_html=True)
-            with st.expander("🔐 Identifiants Mega", expanded=False):
-                mega_email = st.text_input("Email Mega", key="mega_email", placeholder="user@exemple.com")
-                mega_pwd   = st.text_input("Mot de passe", key="mega_pwd", type="password")
-                if mega_email and mega_pwd:
-                    st.session_state["mega_creds"] = (mega_email, mega_pwd)
-                    st.success("Identifiants enregistrés pour cette session.")
-                elif "mega_creds" not in st.session_state:
-                    st.info("Renseignez vos identifiants pour activer l'envoi vers Mega.")
-
-    def _upload_to_mega(self, file_bytes: bytes, filename: str) -> Optional[str]:
-        """Lance l'upload d'un fichier vers Mega et retourne le lien public."""
-        creds = st.session_state.get("mega_creds")
-        if not creds:
-            st.error("Identifiants Mega non configurés. Renseignez-les dans la barre latérale.")
-            return None
-        
-        email, pwd = creds
-        try:
-            uploader = MegaUploader(email, pwd)
-            with st.spinner(f"Connexion à Mega…"):
-                uploader.login()
-            with st.spinner(f"Envoi de {filename} vers Mega…"):
-                link = uploader.upload(file_bytes, filename)
-            return link
-        except RuntimeError as e:
-            st.error(f"Erreur Mega : {e}")
-            return None
-        except Exception as e:
-            st.error(f"Erreur inattendue lors de l'upload : {e}")
-            return None
-
     def render_index_page(self) -> None:
         """Affiche la page de la bibliothèque d'index"""
         st.markdown("<h1>📚 Bibliothèque des Index</h1>", unsafe_allow_html=True)
-        self._render_mega_config()
         
         try:
             indexes = self.file_manager.list_local_indexes()
@@ -1313,45 +1084,18 @@ class DataHubApp:
         else:
             for idx_name in sorted(indexes):
                 with st.expander(f"📄 {idx_name}", expanded=False):
-                    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+                    c1, c2, c3 = st.columns([2, 1, 1])
                     with c1:
                         cat = idx_name.replace('index_', '').replace('.xlsx', '').replace('_', ' ')
                         st.markdown(f"**Catégorie** : {cat}")
                     
-                    content = self.file_manager.get_local_index(idx_name)
-
                     with c2:
+                        content = self.file_manager.get_local_index(idx_name)
                         if content:
-                            st.download_button(
-                                "⬇️ Télécharger", content, idx_name,
-                                key=f"dl_{idx_name}", use_container_width=True
-                            )
+                            st.download_button("Télécharger", content, idx_name, key=f"dl_{idx_name}", use_container_width=True)
                     
                     with c3:
-                        mega_enabled = st.session_state.get("mega_creds") is not None
-                        if st.button(
-                            "☁️ Envoyer Mega",
-                            key=f"mega_{idx_name}",
-                            use_container_width=True,
-                            disabled=not (content and mega_enabled),
-                            help="Configurez vos identifiants Mega dans la barre latérale" if not mega_enabled else None
-                        ):
-                            link = self._upload_to_mega(content, idx_name)
-                            if link:
-                                st.success(f"✅ Fichier envoyé !")
-                                st.markdown(f"[🔗 Ouvrir sur Mega]({link})", unsafe_allow_html=False)
-                                # Mémoriser le lien pour cet index
-                                st.session_state[f"mega_link_{idx_name}"] = link
-                        
-                        # Afficher le dernier lien si disponible
-                        if f"mega_link_{idx_name}" in st.session_state:
-                            st.markdown(
-                                f"[🔗 Dernier lien]({st.session_state[f'mega_link_{idx_name}']})",
-                                unsafe_allow_html=False
-                            )
-
-                    with c4:
-                        if st.button("🗑️ Supprimer", key=f"del_{idx_name}", use_container_width=True):
+                        if st.button("Supprimer", key=f"del_{idx_name}"):
                             if self.file_manager.delete_index(idx_name):
                                 st.rerun()
 
