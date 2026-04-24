@@ -1429,7 +1429,7 @@ class DataHubApp:
             self.render_index_page()
         
         storage_label = "Google Drive + Local" if DriveManager.is_configured() else "Stockage Local"
-        st.markdown(f'<div class="footer">DataHub Pro v3.2 | {storage_label} | © 2024</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="footer">Extractor Data | {storage_label} | © 2026</div>', unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
