@@ -208,45 +208,46 @@ class DriveManager:
 
     @classmethod
     def _get_service(cls):
-        """Initialise le service Drive via OAuth2 (singleton).
-        Ouvre le navigateur pour autorisation uniquement au premier lancement.
-        """
         if cls._service is not None:
             return cls._service
-
+    
         creds = None
-
-        # Reutilise le token sauvegarde si disponible
-        if TOKEN_FILE.exists():
+    
+        # Streamlit Cloud → credentials depuis st.secrets
+        try:
+            if "google_token" in st.secrets:
+                token_info = dict(st.secrets["google_token"])
+                # scopes peut arriver comme string ou liste selon TOML
+                if isinstance(token_info.get("scopes"), str):
+                    token_info["scopes"] = [token_info["scopes"]]
+                creds = Credentials.from_authorized_user_info(token_info, DRIVE_SCOPES)
+        except Exception:
+            pass
+    
+        # Local → token.json sur disque
+        if creds is None and TOKEN_FILE.exists():
             try:
                 creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), DRIVE_SCOPES)
             except Exception:
                 creds = None
-
-        # Rafraichit le token expire ou lance le flow OAuth si besoin
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                try:
-                    creds.refresh(Request())
-                except Exception:
-                    creds = None
-
-            if not creds:
-                if not CREDENTIALS_FILE.exists():
-                    raise FileNotFoundError(
-                        "credentials.json introuvable. "
-                        "Telechargez-le depuis Google Cloud Console et placez-le "
-                        "dans le meme dossier que ce script."
-                    )
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    str(CREDENTIALS_FILE), DRIVE_SCOPES
-                )
-                creds = flow.run_local_server(port=0)
-
-            # Sauvegarde le token pour les prochains lancements
-            TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-            TOKEN_FILE.write_text(creds.to_json())
-
+    
+        # Refresh si expiré
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                # Mise à jour locale si possible
+                if TOKEN_FILE.exists():
+                    TOKEN_FILE.write_text(creds.to_json())
+            except Exception as e:
+                raise RuntimeError(f"Token expiré et refresh échoué : {e}")
+    
+        if not creds:
+            raise RuntimeError(
+                "Aucun credential Drive disponible. "
+                "En local : placez token.json dans ~/DataHub_Index/. "
+                "Sur Streamlit Cloud : configurez [google_token] dans les Secrets."
+            )
+    
         cls._service = build("drive", "v3", credentials=creds, cache_discovery=False)
         return cls._service
 
