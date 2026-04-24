@@ -201,9 +201,15 @@ class DriveManager:
 
     @classmethod
     def is_configured(cls) -> bool:
-        """Verifie si credentials.json ou un token valide existe"""
         if not DRIVE_AVAILABLE:
             return False
+        # Vérifie les secrets Streamlit Cloud
+        try:
+            if "google_token" in st.secrets:
+                return True
+        except Exception:
+            pass
+        # Vérifie les fichiers locaux
         return CREDENTIALS_FILE.exists() or TOKEN_FILE.exists()
 
     @classmethod
