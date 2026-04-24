@@ -13,6 +13,23 @@ from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+# Google Drive (OAuth2 compte personnel)
+try:
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.auth.transport.requests import Request
+    DRIVE_AVAILABLE = True
+except ImportError:
+    DRIVE_AVAILABLE = False
+
+DRIVE_FOLDER_NAME = "DataHub_Index"
+# drive.file = accès limité aux fichiers créés par l'app (plus sécurisé que drive tout entier)
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+CREDENTIALS_FILE = Path("credentials.json")
+TOKEN_FILE = Path.home() / "DataHub_Index" / "token.json"
+
 
 # ============================================================================
 # CONFIGURATION ET CONSTANTES
@@ -162,109 +179,382 @@ LIGHT_COLOR = "#f8f9fa"
 # UTILITAIRES SYSTÈME
 # ============================================================================
 
+class DriveManager:
+    """Gestion des index sur Google Drive via OAuth2 (compte personnel).
+
+    Prérequis :
+      1. pip install google-api-python-client google-auth google-auth-oauthlib
+      2. Google Cloud Console -> APIs & Services -> Identifiants
+         -> Creer un ID client OAuth 2.0 -> Application de bureau
+      3. Activer l'API Google Drive pour le projet
+      4. Telecharger le fichier JSON -> renommer en credentials.json
+      5. Placer credentials.json a la racine du projet (meme dossier que ce script)
+
+    Premier lancement :
+      - Le navigateur s'ouvre automatiquement pour l'autorisation
+      - Un token.json est ensuite sauvegarde dans ~/DataHub_Index/
+      - Les lancements suivants sont silencieux (token reutilise)
+    """
+
+    _service = None
+    _folder_id = None
+
+    @classmethod
+    def is_configured(cls) -> bool:
+        """Verifie si credentials.json ou un token valide existe"""
+        if not DRIVE_AVAILABLE:
+            return False
+        return CREDENTIALS_FILE.exists() or TOKEN_FILE.exists()
+
+    @classmethod
+    def _get_service(cls):
+        """Initialise le service Drive via OAuth2 (singleton).
+        Ouvre le navigateur pour autorisation uniquement au premier lancement.
+        """
+        if cls._service is not None:
+            return cls._service
+
+        creds = None
+
+        # Reutilise le token sauvegarde si disponible
+        if TOKEN_FILE.exists():
+            try:
+                creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), DRIVE_SCOPES)
+            except Exception:
+                creds = None
+
+        # Rafraichit le token expire ou lance le flow OAuth si besoin
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                except Exception:
+                    creds = None
+
+            if not creds:
+                if not CREDENTIALS_FILE.exists():
+                    raise FileNotFoundError(
+                        "credentials.json introuvable. "
+                        "Telechargez-le depuis Google Cloud Console et placez-le "
+                        "dans le meme dossier que ce script."
+                    )
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    str(CREDENTIALS_FILE), DRIVE_SCOPES
+                )
+                creds = flow.run_local_server(port=0)
+
+            # Sauvegarde le token pour les prochains lancements
+            TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+            TOKEN_FILE.write_text(creds.to_json())
+
+        cls._service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        return cls._service
+
+    @classmethod
+    def _get_folder_id(cls) -> Optional[str]:
+        """Trouve ou crée le dossier DataHub_Index sur Drive (singleton)"""
+        if cls._folder_id:
+            return cls._folder_id
+        try:
+            service = cls._get_service()
+            query = (
+                f"name='{DRIVE_FOLDER_NAME}' "
+                f"and mimeType='application/vnd.google-apps.folder' "
+                f"and trashed=false"
+            )
+            results = service.files().list(q=query, fields="files(id, name)").execute()
+            files = results.get("files", [])
+            if files:
+                cls._folder_id = files[0]["id"]
+            else:
+                metadata = {
+                    "name": DRIVE_FOLDER_NAME,
+                    "mimeType": "application/vnd.google-apps.folder",
+                }
+                folder = service.files().create(body=metadata, fields="id").execute()
+                cls._folder_id = folder["id"]
+            return cls._folder_id
+        except Exception as e:
+            st.error(f"Drive — impossible d'accéder au dossier : {e}")
+            return None
+
+    @classmethod
+    def _find_file_id(cls, filename: str) -> Optional[str]:
+        """Retourne l'ID Drive d'un fichier par son nom, ou None"""
+        try:
+            service = cls._get_service()
+            folder_id = cls._get_folder_id()
+            if not folder_id:
+                return None
+            query = f"name='{filename}' and '{folder_id}' in parents and trashed=false"
+            results = service.files().list(q=query, fields="files(id)").execute()
+            files = results.get("files", [])
+            return files[0]["id"] if files else None
+        except Exception:
+            return None
+
+    @classmethod
+    def save(cls, file_content: bytes, filename: str) -> bool:
+        """Crée ou met à jour un fichier sur Drive"""
+        try:
+            service = cls._get_service()
+            folder_id = cls._get_folder_id()
+            if not folder_id:
+                return False
+
+            xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            media = MediaIoBaseUpload(io.BytesIO(file_content), mimetype=xlsx_mime, resumable=True)
+            existing_id = cls._find_file_id(filename)
+
+            if existing_id:
+                service.files().update(fileId=existing_id, media_body=media).execute()
+            else:
+                metadata = {"name": filename, "parents": [folder_id]}
+                service.files().create(body=metadata, media_body=media, fields="id").execute()
+            return True
+        except Exception as e:
+            st.error(f"Drive — erreur de sauvegarde : {e}")
+            return False
+
+    @classmethod
+    def load(cls, filename: str) -> Optional[bytes]:
+        """Télécharge un fichier depuis Drive et retourne ses bytes"""
+        try:
+            service = cls._get_service()
+            file_id = cls._find_file_id(filename)
+            if not file_id:
+                return None
+            buffer = io.BytesIO()
+            request = service.files().get_media(fileId=file_id)
+            downloader = MediaIoBaseDownload(buffer, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            return buffer.getvalue()
+        except Exception as e:
+            st.error(f"Drive — erreur de lecture : {e}")
+            return None
+
+    @classmethod
+    def list_files(cls) -> List[str]:
+        """Liste tous les fichiers .xlsx dans le dossier Drive"""
+        try:
+            service = cls._get_service()
+            folder_id = cls._get_folder_id()
+            if not folder_id:
+                return []
+            query = f"'{folder_id}' in parents and trashed=false and name contains '.xlsx'"
+            results = service.files().list(
+                q=query, fields="files(name)", orderBy="name"
+            ).execute()
+            return [f["name"] for f in results.get("files", [])]
+        except Exception as e:
+            st.error(f"Drive — erreur de liste : {e}")
+            return []
+
+    @classmethod
+    def delete(cls, filename: str) -> bool:
+        """Supprime définitivement un fichier de Drive"""
+        try:
+            service = cls._get_service()
+            file_id = cls._find_file_id(filename)
+            if file_id:
+                service.files().delete(fileId=file_id).execute()
+                return True
+            return False
+        except Exception as e:
+            st.error(f"Drive — erreur de suppression : {e}")
+            return False
+
+    @classmethod
+    def save_json(cls, data: dict, filename: str) -> bool:
+        """Sauvegarde un dict JSON sur Drive"""
+        try:
+            service = cls._get_service()
+            folder_id = cls._get_folder_id()
+            if not folder_id:
+                return False
+            content = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+            media = MediaIoBaseUpload(io.BytesIO(content), mimetype="application/json", resumable=False)
+            existing_id = cls._find_file_id(filename)
+            if existing_id:
+                service.files().update(fileId=existing_id, media_body=media).execute()
+            else:
+                metadata = {"name": filename, "parents": [folder_id]}
+                service.files().create(body=metadata, media_body=media, fields="id").execute()
+            return True
+        except Exception as e:
+            st.error(f"Drive — erreur sauvegarde JSON : {e}")
+            return False
+
+    @classmethod
+    def load_json(cls, filename: str) -> Optional[dict]:
+        """Charge un fichier JSON depuis Drive"""
+        try:
+            service = cls._get_service()
+            file_id = cls._find_file_id(filename)
+            if not file_id:
+                return None
+            buffer = io.BytesIO()
+            request = service.files().get_media(fileId=file_id)
+            downloader = MediaIoBaseDownload(buffer, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            return json.loads(buffer.getvalue().decode("utf-8"))
+        except Exception:
+            return None
+
+
 class FileManager:
-    """Gestion centralisée des opérations sur fichiers"""
+    """Gestion centralisée des opérations sur fichiers.
     
+    Stratégie de stockage :
+      - Si Drive est configuré → Drive comme source de vérité + cache local
+      - Sinon → stockage local uniquement (comportement d'origine)
+    """
+
     @staticmethod
     def get_index_folder() -> Path:
-        """Crée et retourne le chemin du dossier DataHub_Index dans le dossier utilisateur"""
-        user_folder = Path.home()
-        index_folder = user_folder / "DataHub_Index"
-        
+        """Crée et retourne le chemin du dossier DataHub_Index local"""
+        index_folder = Path.home() / "DataHub_Index"
         if index_folder.exists():
-            if index_folder.is_dir():
-                pass
-            else:
+            if not index_folder.is_dir():
                 index_folder.unlink(missing_ok=True)
                 index_folder.mkdir(exist_ok=True)
         else:
             index_folder.mkdir(exist_ok=True)
-        
         return index_folder
-    
+
     @staticmethod
     def save_index_locally(file_content: bytes, filename: str) -> bool:
-        """Sauvegarde le contenu de l'index dans un fichier"""
+        """Sauvegarde l'index en local ET sur Drive si configuré"""
+        # Sauvegarde locale (cache)
+        local_ok = False
         try:
-            index_folder = FileManager.get_index_folder()
-            file_path = index_folder / filename
+            file_path = FileManager.get_index_folder() / filename
             with open(file_path, "wb") as f:
                 f.write(file_content)
-            return True
+            local_ok = True
         except Exception as e:
-            st.error(f"Erreur lors de la sauvegarde : {e}")
-            return False
-    
+            st.warning(f"Cache local — écriture échouée : {e}")
+
+        # Sauvegarde Drive (source de vérité)
+        if DriveManager.is_configured():
+            drive_ok = DriveManager.save(file_content, filename)
+            if drive_ok:
+                st.toast("☁️ Index synchronisé sur Google Drive", icon="✅")
+            return drive_ok
+
+        return local_ok
+
     @staticmethod
     def get_local_index(filename: str) -> Optional[bytes]:
-        """Récupère le contenu d'un index depuis le dossier utilisateur"""
+        """Charge un index : cache local en priorité, sinon Drive"""
+        # Essai local d'abord (plus rapide)
         try:
-            index_folder = FileManager.get_index_folder()
-            file_path = index_folder / filename
+            file_path = FileManager.get_index_folder() / filename
             if file_path.exists():
-                with open(file_path, "rb") as f:
-                    return f.read()
-            return None
-        except Exception as e:
-            st.error(f"Erreur lors de la lecture : {e}")
-            return None
-    
+                return file_path.read_bytes()
+        except Exception:
+            pass
+
+        # Fallback Drive
+        if DriveManager.is_configured():
+            content = DriveManager.load(filename)
+            if content:
+                # Mise en cache local pour les prochaines lectures
+                try:
+                    (FileManager.get_index_folder() / filename).write_bytes(content)
+                except Exception:
+                    pass
+            return content
+
+        return None
+
     @staticmethod
     def list_local_indexes() -> List[str]:
-        """Liste tous les index disponibles dans le dossier utilisateur"""
+        """Liste les index disponibles : Drive en priorité, sinon local"""
+        if DriveManager.is_configured():
+            drive_files = DriveManager.list_files()
+            if drive_files:
+                return drive_files
+
         try:
-            index_folder = FileManager.get_index_folder()
-            return [f.name for f in index_folder.glob("*.xlsx")]
+            return sorted(f.name for f in FileManager.get_index_folder().glob("*.xlsx"))
         except Exception as e:
             st.error(f"Erreur lors de la liste des fichiers : {e}")
             return []
-    
+
     @staticmethod
     def delete_index(filename: str) -> bool:
-        """Supprime un index spécifique du dossier utilisateur"""
+        """Supprime un index en local ET sur Drive"""
+        local_ok = False
         try:
-            index_folder = FileManager.get_index_folder()
-            file_path = index_folder / filename
+            file_path = FileManager.get_index_folder() / filename
             if file_path.exists():
                 file_path.unlink()
-                return True
-            return False
-        except Exception as e:
-            st.error(f"Erreur lors de la suppression : {e}")
-            return False
+                local_ok = True
+        except Exception:
+            pass
+
+        if DriveManager.is_configured():
+            return DriveManager.delete(filename)
+
+        return local_ok
 
 
 class DailyTaskManager:
-    """Gestion des tâches quotidiennes"""
+    """Gestion des tâches quotidiennes (local + Drive)"""
     
+    TASKS_FILENAME = "daily_tasks.json"
+
     @staticmethod
     def get_task_file() -> Path:
-        """Retourne le chemin du fichier de suivi des tâches"""
-        return FileManager.get_index_folder() / "daily_tasks.json"
+        """Retourne le chemin du fichier de suivi des tâches local"""
+        return FileManager.get_index_folder() / DailyTaskManager.TASKS_FILENAME
     
     @staticmethod
     def load_tasks() -> Dict[str, Any]:
-        """Charge les tâches quotidiennes depuis le fichier JSON"""
+        """Charge les tâches : cache local en priorité, sinon Drive"""
         try:
             task_file = DailyTaskManager.get_task_file()
             if task_file.exists():
                 with open(task_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
-            return {}
         except Exception:
-            return {}
+            pass
+
+        # Fallback Drive
+        if DriveManager.is_configured():
+            data = DriveManager.load_json(DailyTaskManager.TASKS_FILENAME)
+            if data:
+                # Mise en cache local
+                try:
+                    with open(DailyTaskManager.get_task_file(), 'w', encoding='utf-8') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+                return data
+
+        return {}
     
     @staticmethod
     def save_tasks(tasks_data: Dict[str, Any]) -> bool:
-        """Sauvegarde les tâches quotidiennes dans le fichier JSON"""
+        """Sauvegarde les tâches en local ET sur Drive"""
+        local_ok = False
         try:
             task_file = DailyTaskManager.get_task_file()
             with open(task_file, 'w', encoding='utf-8') as f:
                 json.dump(tasks_data, f, ensure_ascii=False, indent=2)
-            return True
+            local_ok = True
         except Exception as e:
-            st.error(f"Erreur sauvegarde tâches : {e}")
-            return False
+            st.error(f"Erreur sauvegarde tâches locale : {e}")
+
+        if DriveManager.is_configured():
+            return DriveManager.save_json(tasks_data, DailyTaskManager.TASKS_FILENAME)
+
+        return local_ok
     
     @staticmethod
     def get_today_key() -> str:
@@ -816,6 +1106,24 @@ class UIComponents:
         with st.sidebar:
             st.markdown(f"<h2 style='color:{PRIMARY_COLOR};'>Centre de Contrôle</h2>", unsafe_allow_html=True)
             
+            # Indicateur de statut Drive
+            if DriveManager.is_configured():
+                st.markdown(
+                    "<div style='background:#d4edda;border-radius:8px;padding:8px 12px;"
+                    "font-size:0.85em;color:#155724;margin-bottom:12px;'>"
+                    "☁️ <b>Google Drive connecté</b><br>"
+                    "<span style='font-size:0.9em;'>Synchronisation active</span></div>",
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(
+                    "<div style='background:#fff3cd;border-radius:8px;padding:8px 12px;"
+                    "font-size:0.85em;color:#856404;margin-bottom:12px;'>"
+                    "💾 <b>Stockage local uniquement</b><br>"
+                    "<span style='font-size:0.9em;'>Configurez Drive pour la persistance</span></div>",
+                    unsafe_allow_html=True
+                )
+
             if st.button("📊 Traitement des fichiers", use_container_width=True):
                 st.session_state.page = "Traitement"
                 st.rerun()
@@ -1113,7 +1421,8 @@ class DataHubApp:
         elif st.session_state.page == "Index":
             self.render_index_page()
         
-        st.markdown('<div class="footer">DataHub Pro v3.1 | Stockage Local | © 2024</div>', unsafe_allow_html=True)
+        storage_label = "Google Drive + Local" if DriveManager.is_configured() else "Stockage Local"
+        st.markdown(f'<div class="footer">DataHub Pro v3.2 | {storage_label} | © 2024</div>', unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
